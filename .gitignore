@@ -205,3 +205,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+.idea/*
+outputs/*
+# IDEs
+.idea/
+.vscode/
+
+# Project specific
+outputs/
+.cache/
+*.session
+*.session-journal
+*.session-shm
+*.session-wal
+ruff_errors.txt
+.python-version
+*.log
