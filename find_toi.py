@@ -10,14 +10,15 @@ Requires:
 - A valid Telethon session file named `toi_session.session` in the project root
 - GOOGLE_API_KEY for Gemini AI semantic search
 """
-import os
-import re
-import sys
+
 import argparse
 import asyncio
 import logging
+import os
+import re
 import sqlite3
-from datetime import datetime
+import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -25,29 +26,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 try:
-    from telethon import TelegramClient, errors
-    from telethon.tl.types import Message
-    from telethon.tl.types import DocumentAttributeFilename
     from google import genai
+    from telethon import TelegramClient, errors
+    from telethon.tl.types import DocumentAttributeFilename, Message
 except Exception:
     TelegramClient = None  # type: ignore
     genai = None  # type: ignore
+    DocumentAttributeFilename = object  # type: ignore
+    Message = object  # type: ignore
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler('find_toi.log', encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
+        logging.FileHandler("find_toi.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
 )
 logger = logging.getLogger(__name__)
 
 # Fix console encoding for Windows
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass  # If reconfigure fails, continue anyway
 
@@ -71,36 +73,36 @@ async def retry_with_backoff(func, *args, max_retries=5, initial_delay=1, **kwar
             if "database is locked" not in str(e):
                 raise
             if attempt == max_retries - 1:
-                logger.error(f"Database lock persisted after {max_retries} retries. "
-                           f"Possible causes: another instance running, file lock, or corrupted session. "
-                           f"Try: 1) Close other instances, 2) Delete {SESSION_NAME}.session-shm and -wal files, "
-                           f"3) Restart your system.")
+                logger.error(
+                    f"Database lock persisted after {max_retries} retries. "
+                    f"Possible causes: another instance running, file lock, or corrupted session. "
+                    f"Try: 1) Close other instances, 2) Delete {SESSION_NAME}.session-shm and -wal files, "
+                    f"3) Restart your system."
+                )
                 raise
-            logger.warning(f"Database locked (attempt {attempt + 1}/{max_retries}), retrying in {delay}s...")
+            logger.warning(
+                f"Database locked (attempt {attempt + 1}/{max_retries}), retrying in {delay}s..."
+            )
             await asyncio.sleep(delay)
             delay *= 2  # Exponential backoff
 
 
 def compile_matchers(keywords: List[str], date_str: str):
-    """Build a regex that matches filenames containing:
-    - MUST have: TOI or TOIH (required)
-    - MUST have: Hyderabad or Hyd (required)
-    - MUST have: Date in various formats (DD-MM-YYYY, DD-MM, DD.MM.YYYY)
-    All case-insensitive
-    """
+    """Build regexes for the TOI Hyderabad filename and its date component."""
     # Parse the input date (DD-MM-YYYY)
     try:
         dt = datetime.strptime(date_str, "%d-%m-%Y")
         day = dt.day
         month = dt.month
         year = dt.year
+        date_sep = r"[-./'\s_]"
 
         # Build multiple date pattern variations
         date_patterns = [
-            rf"{day:02d}[-./\s]{month:02d}[-./\s]{year}",  # 29-11-2025, 29.11.2025, 29/11/2025
-            rf"{day:02d}[-./\s]{month:02d}",  # 29-11, 29.11
-            rf"{day}[-./\s]{month:02d}[-./\s]{year}",  # 29-11-2025 (day without leading zero)
-            rf"{day}[-./\s]{month:02d}",  # 29-11 (day without leading zero)
+            rf"{day:02d}{date_sep}{month:02d}{date_sep}{year}",  # 29-11-2025, 29.11.2025, 29'11'2025
+            rf"{day:02d}{date_sep}{month:02d}",  # 29-11, 29.11, 29'11
+            rf"{day}{date_sep}{month:02d}{date_sep}{year}",  # 9-11-2025 (day without leading zero)
+            rf"{day}{date_sep}{month:02d}",  # 9-11, 9.11, 9'11
         ]
         date_pattern = "|".join(date_patterns)
     except ValueError:
@@ -110,13 +112,28 @@ def compile_matchers(keywords: List[str], date_str: str):
     # MUST contain TOI or TOIH (not just any keyword)
     toi_pattern = r"TOI[H]?"  # Matches TOI or TOIH
 
-    # Match files that contain (TOI/TOIH AND Hyderabad/Hyd AND date) in any order
-    # Use positive lookaheads to ensure all three conditions are met
-    regex = re.compile(
-        rf"(?=.*{toi_pattern})(?=.*(?:hyd|hyderabad))(?=.*{date_pattern})",
-        re.IGNORECASE
+    # Match files that contain TOI/TOIH and Hyderabad/Hyd in any order.
+    base_regex = re.compile(
+        rf"(?=.*{toi_pattern})(?=.*(?:hyd|hyderabad))",
+        re.IGNORECASE,
     )
-    return regex
+    date_regex = re.compile(date_pattern, re.IGNORECASE)
+    return base_regex, date_regex
+
+
+def should_scan_message_date(msg_date, target_date) -> bool:
+    """Use message dates as a bounded search window, not an exact-match requirement."""
+    if not target_date or not msg_date:
+        return True
+
+    # Files are often posted slightly before/after the paper date.
+    # Keep a tight window for performance, then let the filename regex decide.
+    return target_date - timedelta(days=2) <= msg_date <= target_date + timedelta(days=1)
+
+
+def is_target_day_post(msg_date, target_date) -> bool:
+    """Return True when the Telegram message itself was posted on the target day."""
+    return bool(msg_date and target_date and msg_date == target_date)
 
 
 def extract_filename_from_message(msg: Message) -> Optional[str]:
@@ -140,7 +157,7 @@ def get_file_size(msg: Message) -> int:
 def get_deep_link(dialog, msg) -> str:
     """Generate a Telegram deep link for a message."""
     try:
-        channel_username = getattr(dialog.entity, 'username', None)
+        channel_username = getattr(dialog.entity, "username", None)
         if channel_username:
             return f"https://t.me/{channel_username}/{msg.id}"
         else:
@@ -154,24 +171,27 @@ async def ai_filter_matches(filenames: List[str], query: str) -> List[str]:
     """Use Gemini AI to filter filenames based on a semantic query."""
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key or genai is None:
-        logger.warning("GOOGLE_API_KEY not set or google-genai not installed. Skipping AI filter.")
+        logger.warning(
+            "GOOGLE_API_KEY not set or google-genai not installed. Skipping AI filter."
+        )
         return filenames
 
     try:
         client = genai.Client(api_key=api_key)
-        
+
         prompt = (
             f"Given the following list of filenames from Telegram messages, "
             f"identify which ones best match the search query: '{query}'.\n"
             f"Return ONLY the matching filenames, one per line, no other text or explanation.\n\n"
             f"Filenames:\n" + "\n".join(filenames)
         )
-        
+
         response = await client.aio.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=prompt
+            model="gemini-1.5-flash", contents=prompt
         )
-        matches = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
+        matches = [
+            line.strip() for line in response.text.strip().split("\n") if line.strip()
+        ]
         # Filter to make sure it only returns names that were in the original list
         return [f for f in matches if f in filenames]
     except Exception as e:
@@ -199,13 +219,15 @@ async def find_matching_files(
 
     session_file = Path(SESSION_NAME + ".session")
     if not session_file.exists():
-        logger.error(f"Session file not found: {session_file}. Make sure you have a valid Telethon session.")
+        logger.error(
+            f"Session file not found: {session_file}. Make sure you have a valid Telethon session."
+        )
         return 1
 
     logger.info(f"Using session file: {session_file}")
     client = TelegramClient(SESSION_NAME, int(api_id), api_hash)
 
-    regex = compile_matchers(keywords, date_str)
+    base_regex, date_regex = compile_matchers(keywords, date_str)
 
     # Parse target date for message filtering
     try:
@@ -222,7 +244,9 @@ async def find_matching_files(
     matches = []  # list of tuples: (dialog, msg, filename, channel_title, file_size)
 
     try:
-        logger.info("Starting channel scan (filtering for newspaper/epaper channels only)...")
+        logger.info(
+            "Starting channel scan (filtering for newspaper/epaper channels only)..."
+        )
         scanned = 0
         async for dialog in client.iter_dialogs():
             # only channels (broadcast)
@@ -235,7 +259,9 @@ async def find_matching_files(
             # Channel name filter
             _channel_filters = ("newspapers", "newspaper", "epaper", "paper", "epapers")
             if not any(k in title_l for k in _channel_filters):
-                logger.debug(f"Skipping channel (no newspaper keywords in name): {title}")
+                logger.debug(
+                    f"Skipping channel (no newspaper keywords in name): {title}"
+                )
                 continue
 
             scanned += 1
@@ -245,13 +271,22 @@ async def find_matching_files(
                 if not getattr(msg, "media", None):
                     continue
 
-                if target_date and getattr(msg, 'date', None):
+                msg_date = None
+                if target_date and getattr(msg, "date", None):
                     try:
                         msg_date = msg.date.date()
                     except Exception:
                         msg_date = None
-                    if msg_date and msg_date != target_date:
-                        continue
+
+                    if msg_date:
+                        if msg_date < target_date - timedelta(days=2):
+                            # Telegram yields messages newest to oldest. If we hit much older messages, stop scanning.
+                            logger.debug(
+                                f"Reached messages older than {target_date - timedelta(days=2)}. Breaking early."
+                            )
+                            break
+                        if not should_scan_message_date(msg_date, target_date):
+                            continue
 
                 fname = extract_filename_from_message(msg)
                 if not fname:
@@ -259,9 +294,14 @@ async def find_matching_files(
 
                 is_match = False
                 if ai_query:
-                    is_match = True 
+                    is_match = True
                 else:
-                    is_match = bool(regex.search(fname))
+                    has_base_match = bool(base_regex.search(fname))
+                    has_date_in_filename = bool(date_regex.search(fname))
+                    posted_on_target_day = is_target_day_post(msg_date, target_date)
+                    is_match = has_base_match and (
+                        has_date_in_filename or posted_on_target_day
+                    )
 
                 if is_match:
                     size = get_file_size(msg)
@@ -269,7 +309,9 @@ async def find_matching_files(
                     size_mb = size / (1024 * 1024) if size else 0.0
                     if not ai_query:
                         deep_link = get_deep_link(dialog, msg)
-                        logger.info(f"[MATCH] {fname} | Channel: {title} | Size: {size_mb:.2f} MB | msg_id: {msg.id} | Link: {deep_link}")
+                        logger.info(
+                            f"[MATCH] {fname} | Channel: {title} | Size: {size_mb:.2f} MB | msg_id: {msg.id} | Link: {deep_link}"
+                        )
 
         if not matches:
             logger.warning(f"No matching files found for {date_str}")
@@ -279,26 +321,32 @@ async def find_matching_files(
             logger.info(f"Performing AI semantic search for: '{ai_query}'...")
             filenames = [m[2] for m in matches]
             ai_matches_filenames = await ai_filter_matches(filenames, ai_query)
-            
+
             filtered_matches = [m for m in matches if m[2] in ai_matches_filenames]
             if not filtered_matches:
                 logger.warning(f"AI search found no matches for: '{ai_query}'")
                 return 2
             matches = filtered_matches
-            
+
             for dialog, msg, fname, title, size in matches:
                 size_mb = size / (1024 * 1024) if size else 0.0
                 deep_link = get_deep_link(dialog, msg)
-                logger.info(f"[MATCH] {fname} | Channel: {title} | Size: {size_mb:.2f} MB | msg_id: {msg.id} | Link: {deep_link}")
+                logger.info(
+                    f"[MATCH] {fname} | Channel: {title} | Size: {size_mb:.2f} MB | msg_id: {msg.id} | Link: {deep_link}"
+                )
 
         matches.sort(key=lambda x: x[4] or 0, reverse=True)
 
-        logger.info(f"\nSummary: Found {len(matches)} matching file(s). Listing all with deep links:")
+        logger.info(
+            f"\nSummary: Found {len(matches)} matching file(s). Listing all with deep links:"
+        )
         for idx, (dialog, msg, fname, channel_title, size) in enumerate(matches, 1):
             size_mb = (size / (1024 * 1024)) if size else 0.0
             deep_link = get_deep_link(dialog, msg)
 
-            logger.info(f"[{idx}] {fname} | Channel: {channel_title} | Size: {size_mb:.2f} MB")
+            logger.info(
+                f"[{idx}] {fname} | Channel: {channel_title} | Size: {size_mb:.2f} MB"
+            )
             logger.info(f"     Link: {deep_link}")
 
         return 0
@@ -315,12 +363,24 @@ async def find_matching_files(
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Find papers/magazines deep links from Telegram channels")
+    parser = argparse.ArgumentParser(
+        description="Find papers/magazines deep links from Telegram channels"
+    )
     parser.add_argument("--date", help="Override date in DD-MM-YYYY format")
-    parser.add_argument("--keywords", help="Comma-separated keywords to match in filename (default TOI,TOIH)")
-    parser.add_argument("--ai-query", help="Use Gemini AI to semantically search for files")
+    parser.add_argument(
+        "--keywords",
+        help="Comma-separated keywords to match in filename (default TOI,TOIH)",
+    )
+    parser.add_argument(
+        "--ai-query", help="Use Gemini AI to semantically search for files"
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    parser.add_argument("--retry", type=int, default=5, help="Number of retries for database lock errors (default 5)")
+    parser.add_argument(
+        "--retry",
+        type=int,
+        default=5,
+        help="Number of retries for database lock errors (default 5)",
+    )
     return parser.parse_args(argv)
 
 

@@ -2,19 +2,22 @@
 TOI Telegram Link Finder - Modern Windows GUI
 Redesigned with customtkinter for a premium look and feel.
 """
-import customtkinter as ctk
+
+import re
 import subprocess
 import threading
-import re
-import webbrowser
-from pathlib import Path
-from datetime import datetime
-from tkinter import scrolledtext, font
 import tkinter as tk
+import webbrowser
+from datetime import datetime
+from pathlib import Path
+from tkinter import scrolledtext
+
+import customtkinter as ctk
 
 # Set appearance mode and color theme
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
 
 class TOIFinderGUI:
     def __init__(self, root):
@@ -32,36 +35,64 @@ class TOIFinderGUI:
         # Row 7 will be the spacer
         self.sidebar_frame.grid_rowconfigure(7, weight=1)
 
-        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="TOI Link Finder", font=ctk.CTkFont(size=20, weight="bold"))
+        self.logo_label = ctk.CTkLabel(
+            self.sidebar_frame,
+            text="TOI Link Finder",
+            font=ctk.CTkFont(size=20, weight="bold"),
+        )
         self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
 
-        self.search_mode_label = ctk.CTkLabel(self.sidebar_frame, text="Search Mode:", anchor="w")
+        self.search_mode_label = ctk.CTkLabel(
+            self.sidebar_frame, text="Search Mode:", anchor="w"
+        )
         self.search_mode_label.grid(row=1, column=0, padx=20, pady=(10, 0))
-        self.search_mode_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["TOI Search", "Magazine Search"])
+        self.search_mode_menu = ctk.CTkOptionMenu(
+            self.sidebar_frame, values=["TOI Search", "Magazine Search"]
+        )
         self.search_mode_menu.grid(row=2, column=0, padx=20, pady=(5, 10))
 
-        self.ai_label = ctk.CTkLabel(self.sidebar_frame, text="Keywords / AI Query:", anchor="w")
+        self.ai_label = ctk.CTkLabel(
+            self.sidebar_frame, text="Keywords / AI Query:", anchor="w"
+        )
         self.ai_label.grid(row=3, column=0, padx=20, pady=(10, 0))
-        self.ai_entry = ctk.CTkEntry(self.sidebar_frame, placeholder_text="e.g. 'Science magazines'")
+        self.ai_entry = ctk.CTkEntry(
+            self.sidebar_frame, placeholder_text="e.g. 'Science magazines'"
+        )
         self.ai_entry.grid(row=4, column=0, padx=20, pady=(5, 10))
         self.ai_entry.bind("<Key>", self.auto_switch_to_magazine)
         self.ai_entry.bind("<Button-1>", self.auto_switch_to_magazine)
 
-        self.search_button = ctk.CTkButton(self.sidebar_frame, text="Start Search", command=self.start_search)
+        self.search_button = ctk.CTkButton(
+            self.sidebar_frame, text="Start Search", command=self.start_search
+        )
         self.search_button.grid(row=5, column=0, padx=20, pady=10)
 
-        self.stop_btn = ctk.CTkButton(self.sidebar_frame, text="Stop Search", command=self.stop_search, 
-                                      fg_color="transparent", border_width=2, text_color=("gray10", "#DCE4EE"), state="disabled")
+        self.stop_btn = ctk.CTkButton(
+            self.sidebar_frame,
+            text="Stop Search",
+            command=self.stop_search,
+            fg_color="transparent",
+            border_width=2,
+            text_color=("gray10", "#DCE4EE"),
+            state="disabled",
+        )
         self.stop_btn.grid(row=6, column=0, padx=20, pady=10)
 
-        self.appearance_mode_label = ctk.CTkLabel(self.sidebar_frame, text="Appearance Mode:", anchor="w")
+        self.appearance_mode_label = ctk.CTkLabel(
+            self.sidebar_frame, text="Appearance Mode:", anchor="w"
+        )
         self.appearance_mode_label.grid(row=8, column=0, padx=20, pady=(10, 0))
-        self.appearance_mode_optionemenu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Dark", "Light", "System"],
-                                                                       command=self.change_appearance_mode_event)
+        self.appearance_mode_optionemenu = ctk.CTkOptionMenu(
+            self.sidebar_frame,
+            values=["Dark", "Light", "System"],
+            command=self.change_appearance_mode_event,
+        )
         self.appearance_mode_optionemenu.grid(row=9, column=0, padx=20, pady=(10, 20))
 
         # --- Main Content Frame ---
-        self.main_frame = ctk.CTkFrame(self.root, corner_radius=0, fg_color="transparent")
+        self.main_frame = ctk.CTkFrame(
+            self.root, corner_radius=0, fg_color="transparent"
+        )
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
         self.main_frame.grid_columnconfigure(0, weight=1)
         self.main_frame.grid_rowconfigure(2, weight=1)
@@ -71,20 +102,30 @@ class TOIFinderGUI:
         self.status_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         self.status_frame.grid_columnconfigure(0, weight=1)
 
-        self.status_label = ctk.CTkLabel(self.status_frame, text="Ready to search", font=ctk.CTkFont(size=14))
+        self.status_label = ctk.CTkLabel(
+            self.status_frame, text="Ready to search", font=ctk.CTkFont(size=14)
+        )
         self.status_label.grid(row=0, column=0, sticky="w")
 
-        self.clear_btn = ctk.CTkButton(self.status_frame, text="Clear All", width=100, command=self.clear_output)
+        self.clear_btn = ctk.CTkButton(
+            self.status_frame, text="Clear All", width=100, command=self.clear_output
+        )
         self.clear_btn.grid(row=0, column=1, sticky="e")
 
         # Discovered Links Frame (Scrollable)
-        self.links_frame = ctk.CTkScrollableFrame(self.main_frame, label_text="📎 Discovered Telegram Links", label_font=ctk.CTkFont(weight="bold"))
+        self.links_frame = ctk.CTkScrollableFrame(
+            self.main_frame,
+            label_text="📎 Discovered Telegram Links",
+            label_font=ctk.CTkFont(weight="bold"),
+        )
         self.links_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 20))
         self.links_frame.grid_columnconfigure(0, weight=1)
-        self.links_frame.grid_remove() # Hide initially
+        self.links_frame.grid_remove()  # Hide initially
 
         # Console Output
-        self.console_label = ctk.CTkLabel(self.main_frame, text="Console Output", font=ctk.CTkFont(weight="bold"))
+        self.console_label = ctk.CTkLabel(
+            self.main_frame, text="Console Output", font=ctk.CTkFont(weight="bold")
+        )
         self.console_label.grid(row=2, column=0, sticky="w", pady=(0, 5))
 
         # We still use scrolledtext for better performance with large logs, but wrap it in a frame
@@ -93,18 +134,27 @@ class TOIFinderGUI:
         self.output_container.grid_columnconfigure(0, weight=1)
         self.output_container.grid_rowconfigure(0, weight=1)
 
-        self.output_text = scrolledtext.ScrolledText(self.output_container, wrap=tk.WORD, 
-                                                    bg="#1e1e1e", fg="#d4d4d4", 
-                                                    insertbackground="white",
-                                                    font=("Consolas", 10),
-                                                    borderwidth=0, highlightthickness=0)
+        self.output_text = scrolledtext.ScrolledText(
+            self.output_container,
+            wrap=tk.WORD,
+            bg="#1e1e1e",
+            fg="#d4d4d4",
+            insertbackground="white",
+            font=("Consolas", 10),
+            borderwidth=0,
+            highlightthickness=0,
+        )
         self.output_text.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
         # Configure text tags for clickable links
         self.output_text.tag_config("link", foreground="#3794ff", underline=True)
         self.output_text.tag_bind("link", "<Button-1>", self.open_link)
-        self.output_text.tag_bind("link", "<Enter>", lambda e: self.output_text.config(cursor="hand2"))
-        self.output_text.tag_bind("link", "<Leave>", lambda e: self.output_text.config(cursor=""))
+        self.output_text.tag_bind(
+            "link", "<Enter>", lambda e: self.output_text.config(cursor="hand2")
+        )
+        self.output_text.tag_bind(
+            "link", "<Leave>", lambda e: self.output_text.config(cursor="")
+        )
 
         # Internal state
         self.discovered_links = []
@@ -123,7 +173,7 @@ class TOIFinderGUI:
 
         # Add timestamp unless line already looks like it has one
         if re.match(r"^\d{4}[-/]", text.strip()):
-            line = text.rstrip('\n')
+            line = text.rstrip("\n")
         else:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             line = f"{ts} - {text.rstrip()}"
@@ -145,14 +195,18 @@ class TOIFinderGUI:
         )
         m = match_pattern.search(line)
         if m:
-            fname = m.group('fname').strip()
-            channel = m.group('channel').strip()
-            msgid = m.group('msgid').strip()
-            link = m.group('link').strip()
+            fname = m.group("fname").strip()
+            channel = m.group("channel").strip()
+            msgid = m.group("msgid").strip()
+            link = m.group("link").strip()
             display_key = f"MATCH|{msgid}|{channel}"
             self.root.after(0, self.links_frame.grid)
-            if display_key not in [l[0] for l in self.discovered_links if isinstance(l, tuple)]:
-                 self.root.after(0, self.add_match_entry, fname, channel, msgid, display_key, link)
+            if display_key not in [
+                entry[0] for entry in self.discovered_links if isinstance(entry, tuple)
+            ]:
+                self.root.after(
+                    0, self.add_match_entry, fname, channel, msgid, display_key, link
+                )
 
         # Insert into text area
         parts = re.split(link_pattern, line)
@@ -176,22 +230,41 @@ class TOIFinderGUI:
         if link in self.discovered_links:
             return
         self.discovered_links.append(link)
-        
-        btn = ctk.CTkButton(self.links_frame, text=link, anchor="w", fg_color="transparent", 
-                            text_color="#3794ff", hover_color="#2b2b2b",
-                            command=lambda lnk=link: self.open_discovered_link(lnk))
+
+        btn = ctk.CTkButton(
+            self.links_frame,
+            text=link,
+            anchor="w",
+            fg_color="transparent",
+            text_color="#3794ff",
+            hover_color="#2b2b2b",
+            command=lambda lnk=link: self.open_discovered_link(lnk),
+        )
         btn.grid(row=len(self.discovered_links), column=0, sticky="ew", pady=2)
 
-    def add_match_entry(self, fname: str, channel: str, msgid: str, key: str, link: str = ""):
+    def add_match_entry(
+        self, fname: str, channel: str, msgid: str, key: str, link: str = ""
+    ):
         # Check if already added
-        if any(isinstance(l, tuple) and l[0] == key for l in self.discovered_links):
+        if any(
+            isinstance(entry, tuple) and entry[0] == key
+            for entry in self.discovered_links
+        ):
             return
         self.discovered_links.append((key, fname))
 
         label_text = f"📄 {fname}\n📡 {channel} | ID: {msgid}"
-        btn = ctk.CTkButton(self.links_frame, text=label_text, anchor="w", fg_color="#2d2d2d",
-                            hover_color="#3d3d3d", text_color="#d4d4d4",
-                            command=lambda ch=channel, mid=msgid, lnk=link: self.on_match_click(ch, mid, lnk))
+        btn = ctk.CTkButton(
+            self.links_frame,
+            text=label_text,
+            anchor="w",
+            fg_color="#2d2d2d",
+            hover_color="#3d3d3d",
+            text_color="#d4d4d4",
+            command=lambda ch=channel, mid=msgid, lnk=link: self.on_match_click(
+                ch, mid, lnk
+            ),
+        )
         btn.grid(row=len(self.discovered_links), column=0, sticky="ew", pady=5, padx=5)
 
     def open_discovered_link(self, link: str):
@@ -204,16 +277,16 @@ class TOIFinderGUI:
     def on_match_click(self, channel: str, msgid: str, link: str = ""):
         self.root.clipboard_clear()
         self.root.clipboard_append(f"{channel} msg_id: {msgid}")
-        
-        status_text = f"✓ Copied info to clipboard"
-        
+
+        status_text = "✓ Copied info to clipboard"
+
         if link and link != "N/A":
             try:
                 webbrowser.open(link)
                 status_text += " | Opening Telegram..."
             except Exception as e:
-                 self.append_output(f"✗ Failed to open deep link: {e}")
-        
+                self.append_output(f"✗ Failed to open deep link: {e}")
+
         self.status_label.configure(text=status_text)
 
     def open_link(self, event):
@@ -231,7 +304,7 @@ class TOIFinderGUI:
         self.links.clear()
         self.link_counter = 0
         for child in self.links_frame.winfo_children():
-             if not isinstance(child, ctk.CTkLabel): # Keep the header label if any
+            if not isinstance(child, ctk.CTkLabel):  # Keep the header label if any
                 child.destroy()
         self.discovered_links.clear()
         self.links_frame.grid_remove()
@@ -243,7 +316,7 @@ class TOIFinderGUI:
         self.search_button.configure(state="disabled")
         self.status_label.configure(text="Searching... Please wait")
         self.stop_search_flag = False
-        
+
         thread = threading.Thread(target=self.run_search, daemon=True)
         thread.start()
 
@@ -257,7 +330,11 @@ class TOIFinderGUI:
                 if keywords:
                     cmd.extend(["--keywords", keywords])
                 else:
-                    self.root.after(0, self.append_output, "⚠️ Please enter keywords for magazine search.")
+                    self.root.after(
+                        0,
+                        self.append_output,
+                        "⚠️ Please enter keywords for magazine search.",
+                    )
                     self.root.after(0, self.search_button.configure, state="normal")
                     return
             else:
@@ -271,10 +348,10 @@ class TOIFinderGUI:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                encoding='utf-8',
-                errors='replace',
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
-                cwd=script_path.parent
+                cwd=script_path.parent,
             )
 
             self.process = process
@@ -284,7 +361,7 @@ class TOIFinderGUI:
                 if self.stop_search_flag:
                     try:
                         process.terminate()
-                    except:
+                    except Exception:
                         pass
                     self.root.after(0, self.append_output, "Search stopped by user.")
                     break
@@ -292,9 +369,13 @@ class TOIFinderGUI:
 
             if not self.stop_search_flag:
                 if process.wait() == 0:
-                    self.root.after(0, self.status_label.configure, text="✓ Search completed!")
+                    self.root.after(
+                        0, self.status_label.configure, text="✓ Search completed!"
+                    )
                 else:
-                    self.root.after(0, self.status_label.configure, text="✗ Search failed")
+                    self.root.after(
+                        0, self.status_label.configure, text="✗ Search failed"
+                    )
 
         except Exception as e:
             self.root.after(0, self.append_output, f"✗ Error: {e}")
@@ -308,21 +389,26 @@ class TOIFinderGUI:
         if self.process:
             try:
                 self.process.terminate()
-            except:
+            except Exception:
                 pass
         self.status_label.configure(text="⏸ Search stopped")
 
     def auto_switch_to_magazine(self, event=None):
         try:
-            if hasattr(self, 'search_mode_menu') and self.search_mode_menu.get() != "Magazine Search":
+            if (
+                hasattr(self, "search_mode_menu")
+                and self.search_mode_menu.get() != "Magazine Search"
+            ):
                 self.search_mode_menu.set("Magazine Search")
         except Exception:
             pass
 
+
 def main():
     root = ctk.CTk()
-    app = TOIFinderGUI(root)
+    TOIFinderGUI(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
