@@ -53,7 +53,23 @@ if sys.platform == "win32":
     except Exception:
         pass  # If reconfigure fails, continue anyway
 
-DEFAULT_KEYWORDS = ["TOI", "TOIH"]  # Only TOI/TOIH are required in matching
+NEWSPAPER_PROFILES = {
+    "toi": {
+        "label": "TOI",
+        "keywords": ["TOI", "TOIH"],
+        "aliases": [r"(?<![A-Za-z0-9])TOIH?(?![A-Za-z0-9])"],
+    },
+    "dc": {
+        "label": "DC",
+        "keywords": ["DC", "Deccan Chronicle"],
+        "aliases": [
+            r"(?<![A-Za-z0-9])DC(?![A-Za-z0-9])",
+            r"Deccan[\s_-]+Chronicle",
+        ],
+    },
+}
+DEFAULT_NEWSPAPER = "toi"
+DEFAULT_KEYWORDS = NEWSPAPER_PROFILES[DEFAULT_NEWSPAPER]["keywords"]
 SESSION_NAME = "toi_session"
 
 
@@ -87,8 +103,18 @@ async def retry_with_backoff(func, *args, max_retries=5, initial_delay=1, **kwar
             delay *= 2  # Exponential backoff
 
 
-def compile_matchers(keywords: List[str], date_str: str):
-    """Build regexes for the TOI Hyderabad filename and its date component."""
+def keyword_to_pattern(keyword: str) -> str:
+    """Convert a filename keyword into a separator-tolerant regex fragment."""
+    escaped = re.escape(keyword.strip()).replace(r"\ ", r"[\s_-]+")
+    if re.fullmatch(r"[A-Za-z0-9]{1,4}", keyword.strip()):
+        return rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])"
+    return escaped
+
+
+def compile_matchers(
+    keywords: List[str], date_str: str, newspaper: str = DEFAULT_NEWSPAPER
+):
+    """Build regexes for the selected Hyderabad newspaper and date component."""
     # Parse the input date (DD-MM-YYYY)
     try:
         dt = datetime.strptime(date_str, "%d-%m-%Y")
@@ -109,12 +135,16 @@ def compile_matchers(keywords: List[str], date_str: str):
         # Fallback to exact match if date parsing fails
         date_pattern = re.escape(date_str)
 
-    # MUST contain TOI or TOIH (not just any keyword)
-    toi_pattern = r"TOI[H]?"  # Matches TOI or TOIH
+    profile = NEWSPAPER_PROFILES.get(newspaper.lower())
+    if profile and keywords == profile["keywords"]:
+        paper_patterns = profile["aliases"]
+    else:
+        paper_patterns = [keyword_to_pattern(k) for k in keywords]
+    paper_pattern = "|".join(paper_patterns)
 
-    # Match files that contain TOI/TOIH and Hyderabad/Hyd in any order.
+    # Match files that contain the selected paper and Hyderabad/Hyd in any order.
     base_regex = re.compile(
-        rf"(?=.*{toi_pattern})(?=.*(?:hyd|hyderabad))",
+        rf"(?=.*(?:{paper_pattern}))(?=.*(?:hyd|hyderabad))",
         re.IGNORECASE,
     )
     date_regex = re.compile(date_pattern, re.IGNORECASE)
@@ -205,9 +235,12 @@ async def find_matching_files(
     verbose: bool,
     max_retries: int = 5,
     ai_query: Optional[str] = None,
+    newspaper: str = DEFAULT_NEWSPAPER,
 ):
     api_id, api_hash = get_env_api_credentials()
-    logger.info(f"Starting TOI PDF lookup for date: {date_str}")
+    profile = NEWSPAPER_PROFILES.get(newspaper.lower())
+    newspaper_label = profile["label"] if profile else newspaper.upper()
+    logger.info(f"Starting {newspaper_label} PDF lookup for date: {date_str}")
     logger.info(f"Keywords: {keywords}, Must contain: Hyderabad or Hyd")
 
     if TelegramClient is None:
@@ -227,7 +260,7 @@ async def find_matching_files(
     logger.info(f"Using session file: {session_file}")
     client = TelegramClient(SESSION_NAME, int(api_id), api_hash)
 
-    base_regex, date_regex = compile_matchers(keywords, date_str)
+    base_regex, date_regex = compile_matchers(keywords, date_str, newspaper)
 
     # Parse target date for message filtering
     try:
@@ -369,7 +402,13 @@ def parse_args(argv=None):
     parser.add_argument("--date", help="Override date in DD-MM-YYYY format")
     parser.add_argument(
         "--keywords",
-        help="Comma-separated keywords to match in filename (default TOI,TOIH)",
+        help="Comma-separated keywords to match in filename (defaults depend on newspaper)",
+    )
+    parser.add_argument(
+        "--newspaper",
+        choices=sorted(NEWSPAPER_PROFILES),
+        default=DEFAULT_NEWSPAPER,
+        help="Newspaper to search for (default toi)",
     )
     parser.add_argument(
         "--ai-query", help="Use Gemini AI to semantically search for files"
@@ -403,7 +442,8 @@ def main(argv=None):
     else:
         date_str = datetime.now().strftime("%d-%m-%Y")
 
-    keywords = DEFAULT_KEYWORDS
+    profile = NEWSPAPER_PROFILES[args.newspaper]
+    keywords = profile["keywords"]
     if args.keywords:
         keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
 
@@ -415,6 +455,7 @@ def main(argv=None):
                 verbose=args.verbose,
                 max_retries=args.retry,
                 ai_query=args.ai_query,
+                newspaper=args.newspaper,
             )
         )
         return return_code or 0

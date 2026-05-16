@@ -1,9 +1,10 @@
 # TGScanner
 
-A powerful Telegram scanning tool that finds newspapers (TOI) and magazines using Gemini AI.
+A powerful Telegram scanning tool that finds newspapers (TOI/DC) and magazines using Gemini AI.
 
 ## Features
 - **TOI Search**: Find "Times of India" Hyderabad edition links.
+- **DC Search**: Find "Deccan Chronicle" Hyderabad edition links.
 - **Magazine Search**: Find any English magazine by keywords using Gemini AI for smart classification.
 - **Deep Links**: Results include direct clickable links to Telegram messages.
 - **Premium GUI**: Built with `customtkinter` for a modern look.

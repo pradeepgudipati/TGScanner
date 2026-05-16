@@ -31,6 +31,39 @@ class CompileMatchersTests(unittest.TestCase):
         self.assertFalse(base_regex.search("ToI Chennai 19'04'2026.pdf"))
         self.assertTrue(date_regex.search("ToI Chennai 19'04'2026.pdf"))
 
+    def test_matches_deccan_chronicle_formats(self):
+        base_regex, date_regex = compile_matchers(
+            ["DC", "Deccan Chronicle"], "19-04-2026", newspaper="dc"
+        )
+
+        self.assertTrue(base_regex.search("DC_Hyderabad_19-04-2026.pdf"))
+        self.assertTrue(date_regex.search("DC_Hyderabad_19-04-2026.pdf"))
+        self.assertTrue(
+            base_regex.search("Deccan Chronicle Hyderabad 19.04.2026.pdf")
+        )
+        self.assertTrue(
+            date_regex.search("Deccan Chronicle Hyderabad 19.04.2026.pdf")
+        )
+
+    def test_deccan_chronicle_rejects_unrelated_dc_substrings(self):
+        base_regex, _ = compile_matchers(
+            ["DC", "Deccan Chronicle"], "19-04-2026", newspaper="dc"
+        )
+
+        self.assertFalse(base_regex.search("IndianChronicle Hyderabad 19-04-2026.pdf"))
+        self.assertFalse(base_regex.search("ABCD Hyderabad 19-04-2026.pdf"))
+
+    def test_deccan_chronicle_previous_day_filename_posted_today(self):
+        target_date = date(2026, 5, 16)
+        base_regex, date_regex = compile_matchers(
+            ["DC", "Deccan Chronicle"], "16-05-2026", newspaper="dc"
+        )
+        filename = "DC_Hyderabad_15-05-2026.pdf"
+
+        self.assertTrue(base_regex.search(filename))
+        self.assertFalse(date_regex.search(filename))
+        self.assertTrue(is_target_day_post(date(2026, 5, 16), target_date))
+
     def test_allows_nearby_message_dates(self):
         target_date = date(2026, 4, 19)
 

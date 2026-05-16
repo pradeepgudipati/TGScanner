@@ -47,7 +47,7 @@ class TOIFinderGUI:
         )
         self.search_mode_label.grid(row=1, column=0, padx=20, pady=(10, 0))
         self.search_mode_menu = ctk.CTkOptionMenu(
-            self.sidebar_frame, values=["TOI Search", "Magazine Search"]
+            self.sidebar_frame, values=["TOI Search", "DC Search", "Magazine Search"]
         )
         self.search_mode_menu.grid(row=2, column=0, padx=20, pady=(5, 10))
 
@@ -340,6 +340,8 @@ class TOIFinderGUI:
             else:
                 script_path = Path(__file__).parent / "find_toi.py"
                 cmd = ["uv", "run", str(script_path)]
+                if search_mode == "DC Search":
+                    cmd.extend(["--newspaper", "dc"])
                 ai_query = self.ai_entry.get().strip()
                 if ai_query:
                     cmd.extend(["--ai-query", ai_query])
@@ -397,7 +399,7 @@ class TOIFinderGUI:
         try:
             if (
                 hasattr(self, "search_mode_menu")
-                and self.search_mode_menu.get() != "Magazine Search"
+                and self.search_mode_menu.get() == "TOI Search"
             ):
                 self.search_mode_menu.set("Magazine Search")
         except Exception:
