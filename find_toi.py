@@ -185,11 +185,12 @@ def get_file_size(msg: Message) -> int:
 
 
 def get_deep_link(dialog, msg) -> str:
-    """Generate a Telegram deep link for a message."""
+    """Generate a Telegram deep link for a message (opens Telegram app directly)."""
     try:
         channel_username = getattr(dialog.entity, "username", None)
         if channel_username:
-            return f"https://t.me/{channel_username}/{msg.id}"
+            # tg://resolve opens Telegram directly without browser
+            return f"tg://resolve?domain={channel_username}&post={msg.id}"
         else:
             # For private channels/groups use tg://openmessage
             return f"tg://openmessage?chat_id={dialog.id}&message_id={msg.id}"
