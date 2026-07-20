@@ -20,6 +20,7 @@ A powerful Telegram scanning tool that finds newspapers (TOI/DC) and magazines u
      TG_API_HASH=your_api_hash
      OPENAI_MODEL=gpt-4o-mini
      OPENAI_API_KEY=your_openai_api_key
+     MAGAZINE_MAX_AGE_DAYS=90
      ```
    - For any OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenRouter, etc.), set a base URL. `OPENAI_API_KEY` is optional for local servers that ignore auth:
      ```env

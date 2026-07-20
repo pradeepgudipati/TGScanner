@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from find_magazine import MagazineSearcher, completion_token_budget
+from find_magazine import (
+    MAX_COMPLETION_TOKENS_CAP,
+    MagazineSearcher,
+    _is_context_overflow_error,
+    completion_token_budget,
+)
 
 
 class ParseLlmJsonTests(unittest.TestCase):
@@ -38,12 +43,20 @@ class ParseLlmJsonTests(unittest.TestCase):
 
 
 class CompletionTokenBudgetTests(unittest.TestCase):
-    def test_scales_with_batch_size(self) -> None:
+    def test_scales_with_batch_size_but_caps(self) -> None:
         small = completion_token_budget(10)
         large = completion_token_budget(500)
-        self.assertGreaterEqual(small, 2048)
-        self.assertGreater(large, small)
-        self.assertEqual(large, 500 * 64 + 512)
+        self.assertGreaterEqual(small, 512)
+        self.assertLessEqual(large, MAX_COMPLETION_TOKENS_CAP)
+        self.assertEqual(completion_token_budget(50), min(4096, 50 * 48 + 256))
+
+
+class ContextOverflowDetectionTests(unittest.TestCase):
+    def test_detects_context_exceeded_message(self) -> None:
+        err = Exception(
+            'Error code: 502 - Context size has been exceeded.'
+        )
+        self.assertTrue(_is_context_overflow_error(err))
 
 
 if __name__ == "__main__":

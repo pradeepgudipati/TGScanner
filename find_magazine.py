@@ -18,7 +18,7 @@ import os
 import re
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -76,17 +76,64 @@ OUTPUT_DIR = Path("outputs")
 CACHE_DIR = Path(".cache/magazine_search")
 MAX_LLM_RETRIES = 5
 DEFAULT_BATCH_DELAY = 40
-# Compact decision JSON ≈ 40–60 tokens/item; pad for braces + retries.
-TOKENS_PER_DECISION = 64
-MAX_COMPLETION_TOKENS_CAP = 65536
+# Local models typically have 4k–16k context; reserved max_tokens counts against it.
+DEFAULT_BATCH_SIZE = 50
+DEFAULT_MAX_AGE_DAYS = 90  # ~3 months; skip older channel posts
+TOKENS_PER_DECISION = 48
+MAX_COMPLETION_TOKENS_CAP = 4096
+CAPTION_PROMPT_CHARS = 80
+
+
+def message_cutoff(max_age_days: int, *, now: Optional[datetime] = None) -> datetime:
+    """UTC timestamp before which channel messages are ignored."""
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    return ref - timedelta(days=max(0, int(max_age_days)))
+
+
+def resolve_max_age_days(cli_value: Optional[int] = None) -> int:
+    """Resolve max age from CLI override, else MAGAZINE_MAX_AGE_DAYS, else default."""
+    if cli_value is not None:
+        return max(0, int(cli_value))
+    raw = (os.getenv("MAGAZINE_MAX_AGE_DAYS") or "").strip()
+    if raw.isdigit():
+        return max(0, int(raw))
+    return DEFAULT_MAX_AGE_DAYS
+
+
+def is_message_recent(msg_date: Optional[datetime], cutoff: datetime) -> bool:
+    """True when msg_date is on/after cutoff (missing dates are treated as recent)."""
+    if msg_date is None:
+        return True
+    if msg_date.tzinfo is None:
+        msg_date = msg_date.replace(tzinfo=timezone.utc)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+    return msg_date >= cutoff
 
 
 def completion_token_budget(item_count: int) -> int:
-    """Scale max_tokens with batch size so large JSON replies are not truncated."""
-    return min(
-        MAX_COMPLETION_TOKENS_CAP,
-        max(2048, int(item_count) * TOKENS_PER_DECISION + 512),
+    """Scale max_tokens with batch size without blowing typical local contexts."""
+    cap = MAX_COMPLETION_TOKENS_CAP
+    env_cap = (os.getenv("OPENAI_MAX_TOKENS") or "").strip()
+    if env_cap.isdigit():
+        cap = max(256, int(env_cap))
+    return min(cap, max(512, int(item_count) * TOKENS_PER_DECISION + 256))
+
+
+def _is_context_overflow_error(err: BaseException) -> bool:
+    err_str = str(err).lower()
+    needles = (
+        "context size",
+        "context length",
+        "context_length",
+        "maximum context",
+        "too many tokens",
+        "prompt is too long",
+        "exceeds the model",
     )
+    return any(n in err_str for n in needles)
 
 
 class MagazineSearcher:
@@ -95,7 +142,7 @@ class MagazineSearcher:
         api_id: int,
         api_hash: str,
         *,
-        batch_size: int = 500,
+        batch_size: int = DEFAULT_BATCH_SIZE,
         batch_delay: float = DEFAULT_BATCH_DELAY,
         keyword_only: bool = False,
         cache_enabled: bool = True,
@@ -130,9 +177,17 @@ class MagazineSearcher:
         await self.client.disconnect()
         logger.info("Telegram client disconnected.")
 
-    async def scan_channels(self, limit: int = 500) -> List[Dict[str, Any]]:
+    async def scan_channels(
+        self, limit: int = 500, max_age_days: int = DEFAULT_MAX_AGE_DAYS
+    ) -> List[Dict[str, Any]]:
         candidates = []
-        logger.info("Enumerating channels and scanning for candidate magazines...")
+        cutoff = message_cutoff(max_age_days)
+        logger.info(
+            "Enumerating channels and scanning for candidate magazines "
+            "(messages since %s, last %s days)...",
+            cutoff.date().isoformat(),
+            max_age_days,
+        )
 
         async for dialog in self.client.iter_dialogs():
             if not getattr(dialog.entity, "broadcast", False):
@@ -148,6 +203,10 @@ class MagazineSearcher:
 
             async for msg in self.client.iter_messages(dialog.id, limit=limit):
                 msg_count += 1
+
+                # Newest-first: stop once we leave the recency window.
+                if not is_message_recent(getattr(msg, "date", None), cutoff):
+                    break
 
                 # Check for "junk" channels (APK/Software) early (first 20 messages)
                 if msg_count <= 20 and msg.media and hasattr(msg.media, "document"):
@@ -314,7 +373,11 @@ class MagazineSearcher:
             batch = to_evaluate[i : i + self.batch_size]
             logger.info(f"Evaluating batch of {len(batch)} magazines...")
             metadata_list = [
-                {"id": idx, "filename": c["filename"], "caption": c["caption"]}
+                {
+                    "id": idx,
+                    "filename": c["filename"],
+                    "caption": (c.get("caption") or "")[:CAPTION_PROMPT_CHARS],
+                }
                 for idx, c in enumerate(batch)
             ]
             decisions = await self._call_llm_batch(metadata_list, user_keywords)
@@ -392,14 +455,25 @@ No markdown. No extra keys. No trailing commas."""
             except Exception as e:
                 err_str = str(e).lower()
                 is_429 = "429" in err_str or "rate" in err_str
+                is_context = _is_context_overflow_error(e)
                 is_json_mode = (
-                    "response_format" in err_str
-                    or "json_object" in err_str
-                    or "invalid_request" in err_str
+                    use_json_object
+                    and (
+                        "response_format" in err_str
+                        or "json_object" in err_str
+                    )
                 )
                 is_parse = isinstance(e, (json.JSONDecodeError, ValueError))
 
-                if is_json_mode and use_json_object:
+                # Oversized prompt/output: split immediately — retries won't help.
+                if is_context and len(items) > 1:
+                    logger.warning(
+                        "Context exceeded for batch of %s; splitting.",
+                        len(items),
+                    )
+                    break
+
+                if is_json_mode:
                     logger.warning(
                         "JSON response_format unsupported; retrying without it."
                     )
@@ -575,6 +649,8 @@ def save_outputs(results: List[Dict[str, Any]], keywords: str):
 
 
 async def main():
+    load_dotenv()
+
     parser = argparse.ArgumentParser(
         description=(
             "Find Magazines by Keyword using an OpenAI-compatible API "
@@ -586,6 +662,15 @@ async def main():
     )
     parser.add_argument(
         "--limit", type=int, default=500, help="Messages to scan per channel"
+    )
+    parser.add_argument(
+        "--max-age-days",
+        type=int,
+        default=None,
+        help=(
+            "Only consider messages from the last N days "
+            f"(default from MAGAZINE_MAX_AGE_DAYS or {DEFAULT_MAX_AGE_DAYS})"
+        ),
     )
     parser.add_argument(
         "--keyword-only",
@@ -601,12 +686,14 @@ async def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=500,
-        help="Candidates per AI batch (default 500)",
+        default=DEFAULT_BATCH_SIZE,
+        help=(
+            f"Candidates per AI batch (default {DEFAULT_BATCH_SIZE}; "
+            "oversized batches auto-split on context errors)"
+        ),
     )
     args = parser.parse_args()
 
-    load_dotenv()
     api_id = os.getenv("TG_API_ID")
     api_hash = os.getenv("TG_API_HASH")
 
@@ -625,6 +712,9 @@ async def main():
             logger.error("%s", e)
             return
 
+    max_age_days = resolve_max_age_days(args.max_age_days)
+    logger.info("Using magazine max age of %s days.", max_age_days)
+
     searcher = MagazineSearcher(
         int(api_id),
         api_hash,
@@ -636,7 +726,9 @@ async def main():
     )
     try:
         await searcher.start()
-        candidates = await searcher.scan_channels(limit=args.limit)
+        candidates = await searcher.scan_channels(
+            limit=args.limit, max_age_days=max_age_days
+        )
         results = await searcher.evaluate_candidates(candidates, args.keywords)
         save_outputs(results, args.keywords)
         logger.info("Done! Results saved to %s", OUTPUT_DIR)
