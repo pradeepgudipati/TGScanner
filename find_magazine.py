@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Find Magazine by Keyword Feature
-Searches Telegram channels for English magazines and uses AI (Gemini and/or OpenAI) to evaluate relevance.
+Searches Telegram channels for English magazines and uses an OpenAI-compatible
+API to evaluate relevance.
 Outputs results to outputs/find_magazine_<timestamp>.json and .md.
 
-Provider: gemini (GOOGLE_API_KEY), openai (OPENAI_API_KEY), or auto (Gemini first, fallback to OpenAI on 429).
-Quota: https://ai.google.dev/gemini-api/docs/rate-limits and https://ai.dev/rate-limit
+Requires OPENAI_MODEL; optional OPENAI_API_KEY and OPENAI_BASE_URL
+(see openai_compat.py).
 """
 
 import argparse
@@ -14,23 +15,18 @@ import hashlib
 import json
 import logging
 import os
-import re
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from google import genai
 from langdetect import DetectorFactory, detect
 from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeFilename, Message
 
-try:
-    from openai import AsyncOpenAI
-except ImportError:
-    AsyncOpenAI = None
+from openai_compat import OpenAICompatConfigError, load_openai_compat
 
 
 async def retry_with_backoff(func, *args, max_retries=5, initial_delay=1, **kwargs):
@@ -76,26 +72,8 @@ if sys.platform == "win32":
 SESSION_NAME = "toi_session"
 OUTPUT_DIR = Path("outputs")
 CACHE_DIR = Path(".cache/magazine_search")
-GEMINI_QUOTA_LINKS = (
-    "https://ai.google.dev/gemini-api/docs/rate-limits and https://ai.dev/rate-limit"
-)
 MAX_LLM_RETRIES = 5
 DEFAULT_BATCH_DELAY = 40
-
-
-def _parse_retry_delay_seconds(err: Exception) -> float:
-    """Parse retry delay from Gemini 429 error details or message. Returns delay in seconds."""
-    msg = str(err)
-    # e.g. "Please retry in 36.956829754s."
-    m = re.search(r"retry in ([\d.]+)s", msg, re.IGNORECASE)
-    if m:
-        return max(1.0, min(120.0, float(m.group(1))))
-    if hasattr(err, "details") and err.details:
-        for d in getattr(err.details, "__iter__", lambda: [])() if err.details else []:
-            if getattr(d, "retry_delay", None):
-                secs = getattr(d.retry_delay, "seconds", None) or 0
-                return max(1.0, min(120.0, float(secs)))
-    return 40.0
 
 
 class MagazineSearcher:
@@ -104,36 +82,28 @@ class MagazineSearcher:
         api_id: int,
         api_hash: str,
         *,
-        gemini_key: Optional[str] = None,
-        openai_key: Optional[str] = None,
-        provider: Literal["gemini", "openai", "auto"] = "auto",
         batch_size: int = 10,
         batch_delay: float = DEFAULT_BATCH_DELAY,
         keyword_only: bool = False,
         cache_enabled: bool = True,
+        openai_client=None,
+        openai_model: Optional[str] = None,
     ):
         self.api_id = api_id
         self.api_hash = api_hash
-        self.provider = provider
         self.batch_size = batch_size
         self.batch_delay = batch_delay
         self.keyword_only = keyword_only
         self.cache_enabled = cache_enabled
         self.client = TelegramClient(SESSION_NAME, api_id, api_hash)
 
-        self.gemini_key = (gemini_key or "").strip() or None
-        self.openai_key = (openai_key or "").strip() or None
-        self.ai_client = None
-        self.openai_client = None
-        self.model_id = "gemini-2.0-flash"
+        self.openai_client = openai_client
+        self.openai_model = openai_model
 
-        if not keyword_only:
-            if self.gemini_key and provider in ("gemini", "auto"):
-                self.ai_client = genai.Client(
-                    api_key=self.gemini_key, http_options={"api_version": "v1"}
-                )
-            if self.openai_key and provider in ("openai", "auto") and AsyncOpenAI:
-                self.openai_client = AsyncOpenAI(api_key=self.openai_key)
+        if not keyword_only and (self.openai_client is None or not self.openai_model):
+            compat = load_openai_compat()
+            self.openai_client = compat.client
+            self.openai_model = compat.model
 
         OUTPUT_DIR.mkdir(exist_ok=True)
         if cache_enabled:
@@ -352,64 +322,14 @@ RETURN ONLY RAW JSON. NO MARKDOWN."""
     async def _call_llm_batch(
         self, items: List[Dict[str, Any]], keywords: str
     ) -> Dict[str, Any]:
-        """Dispatch to Gemini or OpenAI; in auto mode try Gemini then OpenAI on failure."""
-        if self.provider == "openai" and self.openai_client:
-            return await self._call_openai_batch(items, keywords)
-        if self.provider == "auto" and not self.ai_client and self.openai_client:
-            return await self._call_openai_batch(items, keywords)
-        if self.ai_client:
-            out = await self._call_gemini_batch(items, keywords)
-            if out is not None:
-                return out
-            if self.provider == "auto" and self.openai_client:
-                logger.info(
-                    "Gemini quota/error; falling back to OpenAI for this batch."
-                )
-                return await self._call_openai_batch(items, keywords)
-        return {}
-
-    async def _call_gemini_batch(
-        self, items: List[Dict[str, Any]], keywords: str
-    ) -> Optional[Dict[str, Any]]:
-        prompt = self._build_eval_prompt(items, keywords)
-        for attempt in range(MAX_LLM_RETRIES):
-            try:
-                response = await self.ai_client.aio.models.generate_content(
-                    model=self.model_id,
-                    contents=prompt,
-                )
-                text = self._clean_json_text(response.text)
-                return json.loads(text)
-            except Exception as e:
-                err_str = str(e).lower()
-                is_429 = (
-                    "429" in err_str
-                    or "resource_exhausted" in err_str
-                    or "quota" in err_str
-                )
-                if is_429 and attempt < MAX_LLM_RETRIES - 1:
-                    delay = _parse_retry_delay_seconds(e)
-                    logger.warning(
-                        "Gemini rate limit (429). Retrying after %.0fs. See %s",
-                        delay,
-                        GEMINI_QUOTA_LINKS,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                logger.error("Gemini AI batch error: %s", e)
-                return None
-        return None
-
-    async def _call_openai_batch(
-        self, items: List[Dict[str, Any]], keywords: str
-    ) -> Dict[str, Any]:
-        if not self.openai_client:
+        """Call OpenAI-compatible chat Completions for a batch."""
+        if not self.openai_client or not self.openai_model:
             return {}
         prompt = self._build_eval_prompt(items, keywords)
         for attempt in range(MAX_LLM_RETRIES):
             try:
                 response = await self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=self.openai_model,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 text = (response.choices[0].message.content or "").strip()
@@ -423,31 +343,13 @@ RETURN ONLY RAW JSON. NO MARKDOWN."""
                 if is_429 and attempt < MAX_LLM_RETRIES - 1:
                     delay = 30.0 * (2**attempt)
                     logger.warning(
-                        "OpenAI rate limit (429). Retrying after %.0fs.", delay
+                        "AI rate limit (429). Retrying after %.0fs.", delay
                     )
                     await asyncio.sleep(min(delay, 120.0))
                     continue
-                logger.error("OpenAI batch error: %s", e)
+                logger.error("AI batch error: %s", e)
                 return {}
         return {}
-
-    async def _call_gemini(self, metadata: str, keywords: str) -> Dict[str, Any]:
-        # Keep this for fallback or single item if needed, but updated for 404 fix
-        prompt = f"""
-        Evaluate if the following magazine entry is relevant to the keywords: "{keywords}".
-        {metadata}
-        Return JSON list of properties: decision, confidence, reasons.
-        RETURN ONLY RAW JSON. NO MARKDOWN.
-        """
-        try:
-            response = await self.ai_client.aio.models.generate_content(
-                model=self.model_id, contents=prompt
-            )
-            text = self._clean_json_text(response.text)
-            return json.loads(text)
-        except Exception as e:
-            logger.error(f"Gemini AI error: {e}")
-            return {"decision": "UNCERTAIN", "reasons": [str(e)]}
 
     def _clean_json_text(self, text: str) -> str:
         """Strips markdown code blocks from JSON response."""
@@ -502,19 +404,16 @@ def save_outputs(results: List[Dict[str, Any]], keywords: str):
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Find Magazines by Keyword. AI quotas: " + GEMINI_QUOTA_LINKS,
+        description=(
+            "Find Magazines by Keyword using an OpenAI-compatible API "
+            "(OPENAI_MODEL required; OPENAI_API_KEY / OPENAI_BASE_URL optional)."
+        ),
     )
     parser.add_argument(
         "--keywords", required=True, help="Keywords to search for (e.g. computers)"
     )
     parser.add_argument(
         "--limit", type=int, default=500, help="Messages to scan per channel"
-    )
-    parser.add_argument(
-        "--provider",
-        choices=("gemini", "openai", "auto"),
-        default="auto",
-        help="AI provider: gemini, openai, or auto (Gemini first, fallback to OpenAI on 429)",
     )
     parser.add_argument(
         "--keyword-only",
@@ -538,40 +437,30 @@ async def main():
     load_dotenv()
     api_id = os.getenv("TG_API_ID")
     api_hash = os.getenv("TG_API_HASH")
-    gemini_key = os.getenv("GOOGLE_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
 
     if not api_id or not api_hash:
         logger.error("Missing TG_API_ID or TG_API_HASH in .env")
         return
+
+    openai_client = None
+    openai_model = None
     if not args.keyword_only:
-        if args.provider == "gemini" and not gemini_key:
-            logger.error("GOOGLE_API_KEY required for --provider gemini")
-            return
-        if args.provider == "openai":
-            if not openai_key:
-                logger.error("OPENAI_API_KEY required for --provider openai")
-                return
-            if not AsyncOpenAI:
-                logger.error(
-                    "openai package not installed. Add openai to pyproject.toml and run uv sync"
-                )
-                return
-        if args.provider == "auto" and not gemini_key and not openai_key:
-            logger.error(
-                "For --provider auto set at least one of GOOGLE_API_KEY or OPENAI_API_KEY in .env"
-            )
+        try:
+            compat = load_openai_compat()
+            openai_client = compat.client
+            openai_model = compat.model
+        except OpenAICompatConfigError as e:
+            logger.error("%s", e)
             return
 
     searcher = MagazineSearcher(
         int(api_id),
         api_hash,
-        gemini_key=gemini_key,
-        openai_key=openai_key,
-        provider=args.provider,
         batch_size=args.batch_size,
         batch_delay=args.batch_delay,
         keyword_only=args.keyword_only,
+        openai_client=openai_client,
+        openai_model=openai_model,
     )
     try:
         await searcher.start()

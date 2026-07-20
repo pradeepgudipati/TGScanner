@@ -8,7 +8,7 @@ Usage:
 Requires:
 - TELEGRAM_API_ID and TELEGRAM_API_HASH environment variables
 - A valid Telethon session file named `toi_session.session` in the project root
-- GOOGLE_API_KEY for Gemini AI semantic search
+- For --ai-query: OPENAI_MODEL (required), OPENAI_API_KEY / OPENAI_BASE_URL (optional)
 """
 
 import argparse
@@ -24,17 +24,17 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 
+from openai_compat import OpenAICompatConfigError, load_openai_compat
+
 load_dotenv()
 try:
-    from google import genai
     from telethon import TelegramClient, errors
     from telethon.tl.types import DocumentAttributeFilename, Message
 except Exception:
     TelegramClient = None  # type: ignore
-    genai = None  # type: ignore
     DocumentAttributeFilename = object  # type: ignore
     Message = object  # type: ignore
-
+    errors = None  # type: ignore
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -199,17 +199,10 @@ def get_deep_link(dialog, msg) -> str:
 
 
 async def ai_filter_matches(filenames: List[str], query: str) -> List[str]:
-    """Use Gemini AI to filter filenames based on a semantic query."""
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key or genai is None:
-        logger.warning(
-            "GOOGLE_API_KEY not set or google-genai not installed. Skipping AI filter."
-        )
-        return filenames
+    """Use an OpenAI-compatible API to filter filenames based on a semantic query."""
+    compat = load_openai_compat()
 
     try:
-        client = genai.Client(api_key=api_key)
-
         prompt = (
             f"Given the following list of filenames from Telegram messages, "
             f"identify which ones best match the search query: '{query}'.\n"
@@ -217,13 +210,12 @@ async def ai_filter_matches(filenames: List[str], query: str) -> List[str]:
             f"Filenames:\n" + "\n".join(filenames)
         )
 
-        response = await client.aio.models.generate_content(
-            model="gemini-1.5-flash", contents=prompt
+        response = await compat.client.chat.completions.create(
+            model=compat.model,
+            messages=[{"role": "user", "content": prompt}],
         )
-        matches = [
-            line.strip() for line in response.text.strip().split("\n") if line.strip()
-        ]
-        # Filter to make sure it only returns names that were in the original list
+        text = (response.choices[0].message.content or "").strip()
+        matches = [line.strip() for line in text.split("\n") if line.strip()]
         return [f for f in matches if f in filenames]
     except Exception as e:
         logger.error(f"Error during AI filtering: {e}")
@@ -354,7 +346,11 @@ async def find_matching_files(
         if ai_query:
             logger.info(f"Performing AI semantic search for: '{ai_query}'...")
             filenames = [m[2] for m in matches]
-            ai_matches_filenames = await ai_filter_matches(filenames, ai_query)
+            try:
+                ai_matches_filenames = await ai_filter_matches(filenames, ai_query)
+            except OpenAICompatConfigError as e:
+                logger.error("%s", e)
+                return 1
 
             filtered_matches = [m for m in matches if m[2] in ai_matches_filenames]
             if not filtered_matches:
@@ -412,7 +408,8 @@ def parse_args(argv=None):
         help="Newspaper to search for (default toi)",
     )
     parser.add_argument(
-        "--ai-query", help="Use Gemini AI to semantically search for files"
+        "--ai-query",
+        help="Use OpenAI-compatible AI to semantically search for files",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     parser.add_argument(
