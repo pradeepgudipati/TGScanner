@@ -3,8 +3,10 @@ TOI Telegram Link Finder - Modern Windows GUI
 Redesigned with customtkinter for a premium look and feel.
 """
 
+import os
 import re
 import subprocess
+import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -17,6 +19,40 @@ import customtkinter as ctk
 # Set appearance mode and color theme
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+
+def terminate_process_tree(process: subprocess.Popen | None, timeout: float = 5.0) -> None:
+    """Force-stop a subprocess and any children (e.g. `uv run` → python).
+
+    On Windows, Popen.terminate() only signals the direct child. Leaving the
+    Python grandchild alive blocks stdout reads and locks the Telethon session,
+    which freezes the GUI's ability to start later searches.
+    """
+    if process is None or process.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        else:
+            process.terminate()
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=timeout)
+    except Exception:
+        pass
 
 
 class TOIFinderGUI:
@@ -162,6 +198,8 @@ class TOIFinderGUI:
         self.link_counter = 0
         self.stop_search_flag = False
         self.process = None
+        self._search_generation = 0
+        self._search_lock = threading.Lock()
 
     def change_appearance_mode_event(self, new_appearance_mode: str):
         ctk.set_appearance_mode(new_appearance_mode)
@@ -178,7 +216,7 @@ class TOIFinderGUI:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             line = f"{ts} - {text.rstrip()}"
 
-        link_pattern = r"(https?://t\.me/[\w\-_/]+|tg://[\w\-_/\?=&]+)"
+        link_pattern = r"(https?://t\.me/[\w\-_/]+|tg://[^\s]+)"
 
         # Detect any links
         links_found = re.findall(link_pattern, line)
@@ -269,7 +307,7 @@ class TOIFinderGUI:
 
     def open_discovered_link(self, link: str):
         try:
-            webbrowser.open(link)
+            self._open_telegram_link(link)
             self.status_label.configure(text=f"✓ Opened: {link}")
         except Exception as e:
             self.append_output(f"✗ Failed to open link: {e}")
@@ -282,7 +320,7 @@ class TOIFinderGUI:
 
         if link and link != "N/A":
             try:
-                webbrowser.open(link)
+                self._open_telegram_link(link)
                 status_text += " | Opening Telegram..."
             except Exception as e:
                 self.append_output(f"✗ Failed to open deep link: {e}")
@@ -296,8 +334,19 @@ class TOIFinderGUI:
             if tag.startswith("link_"):
                 link = self.links.get(tag)
                 if link:
-                    webbrowser.open(link)
+                    try:
+                        self._open_telegram_link(link)
+                    except Exception as e:
+                        self.append_output(f"✗ Failed to open link: {e}")
                 break
+
+    @staticmethod
+    def _open_telegram_link(link: str) -> None:
+        """Open t.me / tg:// links; prefer OS handler so Desktop Telegram receives them."""
+        if sys.platform == "win32":
+            os.startfile(link)  # type: ignore[attr-defined]
+        else:
+            webbrowser.open(link)
 
     def clear_output(self):
         self.output_text.delete(1.0, tk.END)
@@ -310,17 +359,29 @@ class TOIFinderGUI:
         self.links_frame.grid_remove()
         self.status_label.configure(text="Ready to search")
         self.stop_btn.configure(state="disabled")
-        self.process = None
+        # Do not clear self.process here — an active search may still own it.
 
     def start_search(self):
+        with self._search_lock:
+            if self.process is not None and self.process.poll() is None:
+                self.append_output(
+                    "⚠️ A search is already running. Stop it before starting another."
+                )
+                return
+            self._search_generation += 1
+            generation = self._search_generation
+            self.stop_search_flag = False
+
         self.search_button.configure(state="disabled")
         self.status_label.configure(text="Searching... Please wait")
-        self.stop_search_flag = False
 
-        thread = threading.Thread(target=self.run_search, daemon=True)
+        thread = threading.Thread(
+            target=self.run_search, args=(generation,), daemon=True
+        )
         thread.start()
 
-    def run_search(self):
+    def run_search(self, generation: int):
+        process = None
         try:
             search_mode = self.search_mode_menu.get()
             if search_mode == "Magazine Search":
@@ -335,7 +396,6 @@ class TOIFinderGUI:
                         self.append_output,
                         "⚠️ Please enter keywords for magazine search.",
                     )
-                    self.root.after(0, self.search_button.configure, state="normal")
                     return
             else:
                 script_path = Path(__file__).parent / "find_toi.py"
@@ -346,31 +406,38 @@ class TOIFinderGUI:
                 if ai_query:
                     cmd.extend(["--ai-query", ai_query])
 
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                cwd=script_path.parent,
-            )
+            popen_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "bufsize": 1,
+                "cwd": script_path.parent,
+            }
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
-            self.process = process
+            process = subprocess.Popen(cmd, **popen_kwargs)
+
+            with self._search_lock:
+                if generation != self._search_generation or self.stop_search_flag:
+                    terminate_process_tree(process)
+                    return
+                self.process = process
+
             self.root.after(0, lambda: self.stop_btn.configure(state="normal"))
 
+            assert process.stdout is not None
             for line in process.stdout:
-                if self.stop_search_flag:
-                    try:
-                        process.terminate()
-                    except Exception:
-                        pass
+                if self.stop_search_flag or generation != self._search_generation:
+                    terminate_process_tree(process)
                     self.root.after(0, self.append_output, "Search stopped by user.")
                     break
                 self.root.after(0, self.append_output, line)
 
-            if not self.stop_search_flag:
-                if process.wait() == 0:
+            if not self.stop_search_flag and generation == self._search_generation:
+                exit_code = process.wait()
+                if exit_code == 0:
                     self.root.after(
                         0, self.status_label.configure, text="✓ Search completed!"
                     )
@@ -382,18 +449,25 @@ class TOIFinderGUI:
         except Exception as e:
             self.root.after(0, self.append_output, f"✗ Error: {e}")
         finally:
-            self.root.after(0, self.search_button.configure, state="normal")
-            self.root.after(0, self.stop_btn.configure, state="disabled")
-            self.process = None
+            if process is not None and process.poll() is None:
+                terminate_process_tree(process)
+            with self._search_lock:
+                if self.process is process:
+                    self.process = None
+            if generation == self._search_generation:
+                self.root.after(0, self.search_button.configure, state="normal")
+                self.root.after(0, self.stop_btn.configure, state="disabled")
+                if self.stop_search_flag:
+                    self.root.after(
+                        0, self.status_label.configure, text="⏸ Search stopped"
+                    )
 
     def stop_search(self):
         self.stop_search_flag = True
-        if self.process:
-            try:
-                self.process.terminate()
-            except Exception:
-                pass
-        self.status_label.configure(text="⏸ Search stopped")
+        with self._search_lock:
+            process = self.process
+        terminate_process_tree(process)
+        self.status_label.configure(text="⏸ Stopping search...")
 
     def auto_switch_to_magazine(self, event=None):
         try:

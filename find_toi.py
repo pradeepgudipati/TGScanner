@@ -25,6 +25,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 
 from openai_compat import OpenAICompatConfigError, load_openai_compat
+from telegram_links import message_deep_link
 
 load_dotenv()
 try:
@@ -188,12 +189,11 @@ def get_deep_link(dialog, msg) -> str:
     """Generate a Telegram deep link for a message (opens Telegram app directly)."""
     try:
         channel_username = getattr(dialog.entity, "username", None)
-        if channel_username:
-            # tg://resolve opens Telegram directly without browser
-            return f"tg://resolve?domain={channel_username}&post={msg.id}"
-        else:
-            # For private channels/groups use tg://openmessage
-            return f"tg://openmessage?chat_id={dialog.id}&message_id={msg.id}"
+        return message_deep_link(
+            channel_id=dialog.id,
+            msg_id=msg.id,
+            username=channel_username,
+        )
     except Exception:
         return "N/A"
 
@@ -213,6 +213,8 @@ async def ai_filter_matches(filenames: List[str], query: str) -> List[str]:
         response = await compat.client.chat.completions.create(
             model=compat.model,
             messages=[{"role": "user", "content": prompt}],
+            # ~1 line per filename; leave headroom for longer names.
+            max_tokens=min(65536, max(2048, len(filenames) * 48 + 512)),
         )
         text = (response.choices[0].message.content or "").strip()
         matches = [line.strip() for line in text.split("\n") if line.strip()]

@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -27,6 +28,7 @@ from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeFilename, Message
 
 from openai_compat import OpenAICompatConfigError, load_openai_compat
+from telegram_links import message_deep_link
 
 
 async def retry_with_backoff(func, *args, max_retries=5, initial_delay=1, **kwargs):
@@ -74,6 +76,17 @@ OUTPUT_DIR = Path("outputs")
 CACHE_DIR = Path(".cache/magazine_search")
 MAX_LLM_RETRIES = 5
 DEFAULT_BATCH_DELAY = 40
+# Compact decision JSON ≈ 40–60 tokens/item; pad for braces + retries.
+TOKENS_PER_DECISION = 64
+MAX_COMPLETION_TOKENS_CAP = 65536
+
+
+def completion_token_budget(item_count: int) -> int:
+    """Scale max_tokens with batch size so large JSON replies are not truncated."""
+    return min(
+        MAX_COMPLETION_TOKENS_CAP,
+        max(2048, int(item_count) * TOKENS_PER_DECISION + 512),
+    )
 
 
 class MagazineSearcher:
@@ -82,7 +95,7 @@ class MagazineSearcher:
         api_id: int,
         api_hash: str,
         *,
-        batch_size: int = 10,
+        batch_size: int = 500,
         batch_delay: float = DEFAULT_BATCH_DELAY,
         keyword_only: bool = False,
         cache_enabled: bool = True,
@@ -151,7 +164,12 @@ class MagazineSearcher:
                     channel_candidates = []  # Discard any gathered candidates
                     break
 
-                candidate = self._extract_candidate(msg, title, dialog.id)
+                candidate = self._extract_candidate(
+                    msg,
+                    title,
+                    dialog.id,
+                    getattr(dialog.entity, "username", None),
+                )
                 if candidate:
                     channel_candidates.append(candidate)
 
@@ -169,7 +187,11 @@ class MagazineSearcher:
         return list(deduped.values())
 
     def _extract_candidate(
-        self, msg: Message, channel_name: str, channel_id: int
+        self,
+        msg: Message,
+        channel_name: str,
+        channel_id: int,
+        channel_username: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         if not msg.media or not hasattr(msg.media, "document"):
             return None
@@ -201,13 +223,18 @@ class MagazineSearcher:
             return {
                 "msg_id": msg.id,
                 "channel_id": channel_id,
+                "channel_username": channel_username,
                 "channel_name": channel_name,
                 "filename": filename,
                 "size": msg.media.document.size,
                 "date": msg.date.isoformat(),
                 "caption": caption,
                 "message": msg,
-                "link": self._get_deep_link(channel_name, channel_id, msg.id),
+                "link": message_deep_link(
+                    channel_id=channel_id,
+                    msg_id=msg.id,
+                    username=channel_username,
+                ),
             }
         return None
 
@@ -228,9 +255,17 @@ class MagazineSearcher:
         except Exception:
             return True  # Fallback to true if detection fails
 
-    def _get_deep_link(self, channel_name: str, channel_id: int, msg_id: int) -> str:
-        # Simplified link generation
-        return f"tg://openmessage?chat_id={channel_id}&message_id={msg_id}"
+    def _get_deep_link(
+        self,
+        channel_id: int,
+        msg_id: int,
+        channel_username: Optional[str] = None,
+    ) -> str:
+        return message_deep_link(
+            channel_id=channel_id,
+            msg_id=msg_id,
+            username=channel_username,
+        )
 
     def _keyword_only_filter(
         self, candidates: List[Dict[str, Any]], user_keywords: str
@@ -307,17 +342,15 @@ class MagazineSearcher:
         )
 
     def _build_eval_prompt(self, items: List[Dict[str, Any]], keywords: str) -> str:
-        return f"""Evaluate if the following magazine entries are relevant to the keywords: "{keywords}".
+        # Compact payload + no free-text "reasons" — local models often emit
+        # unescaped quotes there ("Expecting ',' delimiter").
+        return f"""Evaluate magazine relevance for keywords: {json.dumps(keywords)}.
 
-Magazines to evaluate:
-{json.dumps(items, indent=2)}
+Items: {json.dumps(items, ensure_ascii=False, separators=(",", ":"))}
 
-Instructions:
-1. For each item, identify if the publication typically covers "{keywords}".
-2. Use your internal knowledge of the magazine name.
-3. Return a JSON object where keys are the 'id' (as a string) and values are:
-   {{ "decision": "RELEVANT" | "NOT_RELEVANT" | "UNCERTAIN", "confidence": 0.0 to 1.0, "reasons": ["Short reason"] }}
-RETURN ONLY RAW JSON. NO MARKDOWN."""
+Return ONLY a JSON object. Keys are item id strings. Each value is:
+{{"decision":"RELEVANT"|"NOT_RELEVANT"|"UNCERTAIN","confidence":0.0}}
+No markdown. No extra keys. No trailing commas."""
 
     async def _call_llm_batch(
         self, items: List[Dict[str, Any]], keywords: str
@@ -325,21 +358,54 @@ RETURN ONLY RAW JSON. NO MARKDOWN."""
         """Call OpenAI-compatible chat Completions for a batch."""
         if not self.openai_client or not self.openai_model:
             return {}
+        if not items:
+            return {}
+
         prompt = self._build_eval_prompt(items, keywords)
+        messages: List[Dict[str, str]] = [{"role": "user", "content": prompt}]
+        use_json_object = True
+        last_text = ""
+
         for attempt in range(MAX_LLM_RETRIES):
             try:
-                response = await self.openai_client.chat.completions.create(
-                    model=self.openai_model,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                text = (response.choices[0].message.content or "").strip()
-                if not text:
-                    return {}
-                text = self._clean_json_text(text)
-                return json.loads(text)
+                kwargs: Dict[str, Any] = {
+                    "model": self.openai_model,
+                    "messages": messages,
+                    "max_tokens": completion_token_budget(len(items)),
+                }
+                if use_json_object:
+                    kwargs["response_format"] = {"type": "json_object"}
+                response = await self.openai_client.chat.completions.create(**kwargs)
+                choice = response.choices[0]
+                last_text = (choice.message.content or "").strip()
+                finish = getattr(choice, "finish_reason", None)
+                if finish == "length":
+                    raise json.JSONDecodeError(
+                        "response truncated (finish_reason=length)",
+                        last_text or "",
+                        0,
+                    )
+                if not last_text:
+                    raise ValueError("empty model response")
+                parsed = self._parse_llm_json(last_text)
+                return self._normalize_decisions(parsed)
             except Exception as e:
                 err_str = str(e).lower()
                 is_429 = "429" in err_str or "rate" in err_str
+                is_json_mode = (
+                    "response_format" in err_str
+                    or "json_object" in err_str
+                    or "invalid_request" in err_str
+                )
+                is_parse = isinstance(e, (json.JSONDecodeError, ValueError))
+
+                if is_json_mode and use_json_object:
+                    logger.warning(
+                        "JSON response_format unsupported; retrying without it."
+                    )
+                    use_json_object = False
+                    continue
+
                 if is_429 and attempt < MAX_LLM_RETRIES - 1:
                     delay = 30.0 * (2**attempt)
                     logger.warning(
@@ -347,20 +413,126 @@ RETURN ONLY RAW JSON. NO MARKDOWN."""
                     )
                     await asyncio.sleep(min(delay, 120.0))
                     continue
+
+                if is_parse and attempt < MAX_LLM_RETRIES - 1:
+                    logger.warning(
+                        "AI JSON parse failed (attempt %s/%s): %s",
+                        attempt + 1,
+                        MAX_LLM_RETRIES,
+                        e,
+                    )
+                    messages = [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": last_text[:4000]},
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous reply was invalid JSON "
+                                f"({e}). Reply again with ONLY valid JSON matching "
+                                "the required schema. No markdown."
+                            ),
+                        },
+                    ]
+                    continue
+
                 logger.error("AI batch error: %s", e)
-                return {}
+                break
+
+        # Last resort: split so one bad object cannot wipe the whole batch.
+        if len(items) > 1:
+            mid = len(items) // 2
+            logger.warning(
+                "Splitting failed AI batch of %s into %s + %s",
+                len(items),
+                mid,
+                len(items) - mid,
+            )
+            left = await self._call_llm_batch(items[:mid], keywords)
+            right = await self._call_llm_batch(items[mid:], keywords)
+            merged = dict(left)
+            merged.update(right)
+            return merged
         return {}
 
-    def _clean_json_text(self, text: str) -> str:
-        """Strips markdown code blocks from JSON response."""
+    @staticmethod
+    def _clean_json_text(text: str) -> str:
+        """Strip markdown fences and isolate the outermost JSON object."""
         text = text.strip()
         if text.startswith("```json"):
             text = text[7:]
-        if text.startswith("```"):
+        elif text.startswith("```"):
             text = text[3:]
         if text.endswith("```"):
             text = text[:-3]
+        text = text.strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
+        text = re.sub(r",\s*}", "}", text)
+        text = re.sub(r",\s*]", "]", text)
         return text.strip()
+
+    @staticmethod
+    def _parse_llm_json(text: str) -> Dict[str, Any]:
+        cleaned = MagazineSearcher._clean_json_text(text)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            repaired = (
+                cleaned.replace("\u201c", '"')
+                .replace("\u201d", '"')
+                .replace("\u2018", "'")
+                .replace("\u2019", "'")
+            )
+            data = json.loads(repaired)
+        if not isinstance(data, dict):
+            raise ValueError(f"expected JSON object, got {type(data).__name__}")
+        return data
+
+    @staticmethod
+    def _normalize_decisions(raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Coerce model output into {id: {decision, confidence, reasons}}."""
+        out: Dict[str, Any] = {}
+        for key, value in raw.items():
+            sid = str(key)
+            if isinstance(value, str):
+                decision = value.strip().upper().replace(" ", "_")
+                out[sid] = {
+                    "decision": decision
+                    if decision in {"RELEVANT", "NOT_RELEVANT", "UNCERTAIN"}
+                    else "NOT_RELEVANT",
+                    "confidence": 0.5,
+                    "reasons": [],
+                }
+                continue
+            if not isinstance(value, dict):
+                continue
+            decision = str(value.get("decision", "NOT_RELEVANT")).strip().upper()
+            decision = decision.replace(" ", "_")
+            if decision in {"R", "YES", "TRUE"}:
+                decision = "RELEVANT"
+            elif decision in {"N", "NO", "FALSE"}:
+                decision = "NOT_RELEVANT"
+            elif decision in {"U", "UNKNOWN", "MAYBE"}:
+                decision = "UNCERTAIN"
+            if decision not in {"RELEVANT", "NOT_RELEVANT", "UNCERTAIN"}:
+                decision = "NOT_RELEVANT"
+            try:
+                confidence = float(value.get("confidence", 0.5))
+            except (TypeError, ValueError):
+                confidence = 0.5
+            reasons = value.get("reasons", [])
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            elif not isinstance(reasons, list):
+                reasons = []
+            out[sid] = {
+                "decision": decision,
+                "confidence": confidence,
+                "reasons": reasons,
+            }
+        return out
 
 
 def save_outputs(results: List[Dict[str, Any]], keywords: str):
@@ -429,8 +601,8 @@ async def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=10,
-        help="Candidates per AI batch (default 10)",
+        default=500,
+        help="Candidates per AI batch (default 500)",
     )
     args = parser.parse_args()
 
