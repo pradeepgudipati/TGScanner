@@ -1,11 +1,11 @@
 # TGScanner
 
-A powerful Telegram scanning tool that finds newspapers (TOI/DC) and magazines using Gemini AI.
+A powerful Telegram scanning tool that finds newspapers (TOI/DC) and magazines using an OpenAI-compatible AI API.
 
 ## Features
 - **TOI Search**: Find "Times of India" Hyderabad edition links.
 - **DC Search**: Find "Deccan Chronicle" Hyderabad edition links.
-- **Magazine Search**: Find any English magazine by keywords using Gemini AI for smart classification.
+- **Magazine Search**: Find any English magazine by keywords using AI for smart classification.
 - **Deep Links**: Results include direct clickable links to Telegram messages.
 - **Premium GUI**: Built with `customtkinter` for a modern look.
 
@@ -18,8 +18,16 @@ A powerful Telegram scanning tool that finds newspapers (TOI/DC) and magazines u
      ```env
      TG_API_ID=your_api_id
      TG_API_HASH=your_api_hash
-     GOOGLE_API_KEY=your_gemini_api_key
+     OPENAI_MODEL=gpt-4o-mini
+     OPENAI_API_KEY=your_openai_api_key
      ```
+   - For any OpenAI-compatible server (Ollama, LM Studio, vLLM, OpenRouter, etc.), set a base URL. `OPENAI_API_KEY` is optional for local servers that ignore auth:
+     ```env
+     OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+     OPENAI_MODEL=llama3.2
+     # OPENAI_API_KEY can be omitted; a placeholder is used automatically
+     ```
+   - `OPENAI_MODEL` is required whenever AI features run (magazine evaluation or TOI `--ai-query`).
 3. **Install Dependencies**:
    ```bash
    uv sync
