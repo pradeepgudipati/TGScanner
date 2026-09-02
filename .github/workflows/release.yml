@@ -31,6 +31,8 @@ jobs:
             artifact: TelegramTOI-linux-x64.tar.gz
           - os: macos-latest
             artifact: TelegramTOI-macos-arm64.zip
+          - os: macos-13
+            artifact: TelegramTOI-macos-x64.zip
     steps:
       - uses: actions/checkout@v5
         with:
@@ -64,7 +66,7 @@ jobs:
         if: runner.os == 'macOS'
         run: ditto -c -k --keepParent "dist/TelegramTOI.app" "${{ matrix.artifact }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -75,7 +77,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
@@ -93,9 +95,10 @@ jobs:
 
             | Platform | Download | Run |
             |----------|----------|-----|
-            | Windows  | `TelegramTOI-windows-x64.zip` | Unzip, run `TelegramTOI.exe` |
-            | Linux    | `TelegramTOI-linux-x64.tar.gz` | `tar -xzf`, run `./TelegramTOI` |
-            | macOS    | `TelegramTOI-macos-arm64.zip` | Unzip, right-click `TelegramTOI.app` → Open |
+            | Windows | `TelegramTOI-windows-x64.zip` | Unzip, run `TelegramTOI.exe` |
+            | Linux | `TelegramTOI-linux-x64.tar.gz` | `tar -xzf`, run `./TelegramTOI` |
+            | macOS (Apple Silicon) | `TelegramTOI-macos-arm64.zip` | Unzip, right-click `TelegramTOI.app` → Open |
+            | macOS (Intel) | `TelegramTOI-macos-x64.zip` | Unzip, right-click `TelegramTOI.app` → Open |
 
             The apps are **unsigned**. macOS Gatekeeper needs right-click → Open (or
             `xattr -dr com.apple.quarantine TelegramTOI.app`); Windows SmartScreen
