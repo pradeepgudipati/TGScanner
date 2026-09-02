@@ -33,8 +33,15 @@ A powerful Telegram scanning tool that finds newspapers (TOI/DC) and magazines u
    ```bash
    uv sync
    ```
-4. **Telegram Session**:
-   Ensure you have a valid `toi_session.session` file in the root. (Log in through Telethon if needed).
+4. **Telegram login**:
+   Just launch the app. On first run it shows a sign-in screen — enter your
+   API ID/hash (from my.telegram.org), then your phone number, the login code
+   Telegram sends you, and a two-step password if your account has one. The
+   authorised session is saved and reused on every later launch. Use the
+   **Telegram account** button in the sidebar to sign out or switch accounts.
+
+   A pre-existing `toi_session.session` in the project root (or config dir) is
+   picked up automatically and skips the sign-in screen.
 
 ## Running the App
 
@@ -47,6 +54,34 @@ Or run via python directly:
 ```bash
 uv run toi_gui.py
 ```
+
+## Building a standalone desktop app
+
+Package the GUI into a double-clickable app so no terminal / `uv run` is needed:
+
+```bash
+uv sync
+uv run pyinstaller TelegramTOI.spec
+```
+
+Output lands in `dist/TelegramTOI/` (a folder app; `TelegramTOI.app` on macOS).
+PyInstaller does **not** cross-compile — run the command on each OS you want a
+build for (Windows `.exe`, macOS `.app`, Linux binary).
+
+### Config location for the packaged app
+
+The source checkout keeps using the repo root for `.env`, `toi_session.session`,
+logs and `outputs/`. The **packaged app** instead uses a per-user directory:
+
+| OS      | Path                                               |
+|---------|----------------------------------------------------|
+| Windows | `%APPDATA%\TelegramTOI`                             |
+| macOS   | `~/Library/Application Support/TelegramTOI`         |
+| Linux   | `${XDG_CONFIG_HOME:-~/.config}/TelegramTOI`         |
+
+The sign-in screen writes `.env` and `toi_session.session` there for you; the
+session file's permissions are tightened to your user account. Set
+`TELEGRAMTOI_HOME` to override the location.
 
 ## How to use Magazine Search
 1. Type keywords (e.g., 'National Geographic' or 'finance') in the **Keywords / AI Query** field.

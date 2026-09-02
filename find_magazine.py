@@ -22,11 +22,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
 from langdetect import DetectorFactory, detect
 from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeFilename, Message
 
+import paths
 from openai_compat import OpenAICompatConfigError, load_openai_compat
 from telegram_links import message_deep_link
 
@@ -58,7 +58,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("find_magazine.log", encoding="utf-8"),
+        logging.FileHandler(paths.logs_dir() / "find_magazine.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -71,9 +71,9 @@ if sys.platform == "win32":
         pass
 
 # Constants
-SESSION_NAME = "toi_session"
-OUTPUT_DIR = Path("outputs")
-CACHE_DIR = Path(".cache/magazine_search")
+SESSION_NAME = str(paths.session_base())
+OUTPUT_DIR = paths.outputs_dir()
+CACHE_DIR = paths.cache_dir()
 MAX_LLM_RETRIES = 5
 DEFAULT_BATCH_DELAY = 40
 # Local models typically have 4k–16k context; reserved max_tokens counts against it.
@@ -648,8 +648,8 @@ def save_outputs(results: List[Dict[str, Any]], keywords: str):
             f.write("\n---\n")
 
 
-async def main():
-    load_dotenv()
+async def main(argv=None):
+    paths.load_env()
 
     parser = argparse.ArgumentParser(
         description=(
@@ -692,7 +692,7 @@ async def main():
             "oversized batches auto-split on context errors)"
         ),
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     api_id = os.getenv("TG_API_ID")
     api_hash = os.getenv("TG_API_HASH")

@@ -22,12 +22,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
-from dotenv import load_dotenv
-
+import paths
 from openai_compat import OpenAICompatConfigError, load_openai_compat
 from telegram_links import message_deep_link
 
-load_dotenv()
+paths.load_env()
 try:
     from telethon import TelegramClient, errors
     from telethon.tl.types import DocumentAttributeFilename, Message
@@ -41,7 +40,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler("find_toi.log", encoding="utf-8"),
+        logging.FileHandler(paths.logs_dir() / "find_toi.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -71,7 +70,7 @@ NEWSPAPER_PROFILES = {
 }
 DEFAULT_NEWSPAPER = "toi"
 DEFAULT_KEYWORDS = NEWSPAPER_PROFILES[DEFAULT_NEWSPAPER]["keywords"]
-SESSION_NAME = "toi_session"
+SESSION_NAME = str(paths.session_base())
 
 
 def get_env_api_credentials():
@@ -159,7 +158,9 @@ def should_scan_message_date(msg_date, target_date) -> bool:
 
     # Files are often posted slightly before/after the paper date.
     # Keep a tight window for performance, then let the filename regex decide.
-    return target_date - timedelta(days=2) <= msg_date <= target_date + timedelta(days=1)
+    return (
+        target_date - timedelta(days=2) <= msg_date <= target_date + timedelta(days=1)
+    )
 
 
 def is_target_day_post(msg_date, target_date) -> bool:
@@ -231,6 +232,7 @@ async def find_matching_files(
     max_retries: int = 5,
     ai_query: Optional[str] = None,
     newspaper: str = DEFAULT_NEWSPAPER,
+    out_results: Optional[List[dict]] = None,
 ):
     api_id, api_hash = get_env_api_credentials()
     profile = NEWSPAPER_PROFILES.get(newspaper.lower())
@@ -380,6 +382,21 @@ async def find_matching_files(
                 f"[{idx}] {fname} | Channel: {channel_title} | Size: {size_mb:.2f} MB"
             )
             logger.info(f"     Link: {deep_link}")
+
+            if out_results is not None:
+                out_results.append(
+                    {
+                        "filename": fname,
+                        "channel": channel_title,
+                        "size_mb": round(size_mb, 2),
+                        "msg_id": msg.id,
+                        "date": (
+                            msg.date.isoformat() if getattr(msg, "date", None) else None
+                        ),
+                        "deep_link": deep_link,
+                        "newspaper": newspaper,
+                    }
+                )
 
         return 0
 

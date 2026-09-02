@@ -12,16 +12,22 @@ import tkinter as tk
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from tkinter import scrolledtext
+from tkinter import messagebox, scrolledtext
 
 import customtkinter as ctk
+
+import auth
+import login_gui
+import paths
 
 # Set appearance mode and color theme
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 
-def terminate_process_tree(process: subprocess.Popen | None, timeout: float = 5.0) -> None:
+def terminate_process_tree(
+    process: subprocess.Popen | None, timeout: float = 5.0
+) -> None:
     """Force-stop a subprocess and any children (e.g. `uv run` → python).
 
     On Windows, Popen.terminate() only signals the direct child. Leaving the
@@ -53,6 +59,40 @@ def terminate_process_tree(process: subprocess.Popen | None, timeout: float = 5.
         process.wait(timeout=timeout)
     except Exception:
         pass
+
+
+def build_worker_command(worker: str, args: list[str]) -> tuple[list[str], Path]:
+    """Return the command that runs a search worker plus its working directory.
+
+    Frozen builds re-invoke the app executable with a ``--worker`` subcommand
+    (there is no ``uv`` or ``.py`` file to run); source checkouts still use
+    ``uv run <script>``.
+    """
+    if getattr(sys, "frozen", False):
+        return (
+            [sys.executable, "--worker", worker, *args],
+            Path(sys.executable).resolve().parent,
+        )
+    root = Path(__file__).resolve().parent
+    script = {"toi": "find_toi.py", "magazine": "find_magazine.py"}[worker]
+    return (["uv", "run", str(root / script), *args], root)
+
+
+def run_worker(worker: str, argv: list[str]) -> int:
+    """Entry point for a ``--worker`` subprocess inside a frozen build."""
+    if worker == "toi":
+        import find_toi
+
+        return find_toi.main(argv)
+    if worker == "magazine":
+        import asyncio
+
+        import find_magazine
+
+        asyncio.run(find_magazine.main(argv))
+        return 0
+    print(f"Unknown worker: {worker}", file=sys.stderr)
+    return 2
 
 
 class TOIFinderGUI:
@@ -123,7 +163,17 @@ class TOIFinderGUI:
             values=["Dark", "Light", "System"],
             command=self.change_appearance_mode_event,
         )
-        self.appearance_mode_optionemenu.grid(row=9, column=0, padx=20, pady=(10, 20))
+        self.appearance_mode_optionemenu.grid(row=9, column=0, padx=20, pady=(10, 10))
+
+        self.account_button = ctk.CTkButton(
+            self.sidebar_frame,
+            text="Telegram account",
+            fg_color="transparent",
+            border_width=1,
+            text_color=("gray10", "#DCE4EE"),
+            command=self.open_account_menu,
+        )
+        self.account_button.grid(row=10, column=0, padx=20, pady=(0, 20))
 
         # --- Main Content Frame ---
         self.main_frame = ctk.CTkFrame(
@@ -203,6 +253,51 @@ class TOIFinderGUI:
 
     def change_appearance_mode_event(self, new_appearance_mode: str):
         ctk.set_appearance_mode(new_appearance_mode)
+
+    def open_account_menu(self):
+        win = ctk.CTkToplevel(self.root)
+        win.title("Telegram account")
+        win.geometry("340x210")
+        win.transient(self.root)
+        win.after(150, win.lift)
+        win.after(200, win.grab_set)
+
+        ctk.CTkLabel(
+            win,
+            text="Manage your Telegram session",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(pady=(24, 12))
+        ctk.CTkButton(
+            win,
+            text="Sign in / switch account",
+            command=lambda: (win.destroy(), self._relogin()),
+        ).pack(pady=6)
+        ctk.CTkButton(
+            win,
+            text="Sign out",
+            fg_color="transparent",
+            border_width=1,
+            text_color=("gray10", "#DCE4EE"),
+            command=lambda: (win.destroy(), self._sign_out()),
+        ).pack(pady=6)
+
+    def _relogin(self):
+        if login_gui.run_login_overlay(self.root):
+            self.status_label.configure(text="✓ Telegram sign-in updated")
+
+    def _sign_out(self):
+        if not messagebox.askyesno(
+            "Sign out",
+            "Delete the stored Telegram session? You will need to log in "
+            "again the next time TelegramTOI starts.",
+        ):
+            return
+        auth.sign_out()
+        messagebox.showinfo(
+            "Signed out",
+            "Session removed. TelegramTOI will now close — reopen it to log in.",
+        )
+        self.root.destroy()
 
     def append_output(self, text):
         """Append text to output area and detect links. Add timestamp if missing."""
@@ -385,11 +480,11 @@ class TOIFinderGUI:
         try:
             search_mode = self.search_mode_menu.get()
             if search_mode == "Magazine Search":
-                script_path = Path(__file__).parent / "find_magazine.py"
-                cmd = ["uv", "run", str(script_path)]
+                worker = "magazine"
+                worker_args: list[str] = []
                 keywords = self.ai_entry.get().strip()
                 if keywords:
-                    cmd.extend(["--keywords", keywords])
+                    worker_args.extend(["--keywords", keywords])
                 else:
                     self.root.after(
                         0,
@@ -398,13 +493,15 @@ class TOIFinderGUI:
                     )
                     return
             else:
-                script_path = Path(__file__).parent / "find_toi.py"
-                cmd = ["uv", "run", str(script_path)]
+                worker = "toi"
+                worker_args = []
                 if search_mode == "DC Search":
-                    cmd.extend(["--newspaper", "dc"])
+                    worker_args.extend(["--newspaper", "dc"])
                 ai_query = self.ai_entry.get().strip()
                 if ai_query:
-                    cmd.extend(["--ai-query", ai_query])
+                    worker_args.extend(["--ai-query", ai_query])
+
+            cmd, work_dir = build_worker_command(worker, worker_args)
 
             popen_kwargs = {
                 "stdout": subprocess.PIPE,
@@ -412,10 +509,13 @@ class TOIFinderGUI:
                 "encoding": "utf-8",
                 "errors": "replace",
                 "bufsize": 1,
-                "cwd": script_path.parent,
+                "cwd": str(work_dir),
             }
             if sys.platform == "win32":
-                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                flags = subprocess.CREATE_NEW_PROCESS_GROUP
+                if getattr(sys, "frozen", False):
+                    flags |= subprocess.CREATE_NO_WINDOW
+                popen_kwargs["creationflags"] = flags
 
             process = subprocess.Popen(cmd, **popen_kwargs)
 
@@ -481,8 +581,35 @@ class TOIFinderGUI:
 
 
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--worker":
+        sys.exit(run_worker(sys.argv[2], sys.argv[3:]))
+
+    paths.load_env()
+
     root = ctk.CTk()
-    TOIFinderGUI(root)
+
+    def start_main_ui() -> None:
+        for child in root.winfo_children():
+            child.destroy()
+        root.title("TOI Telegram Link Finder Pro")
+        root.geometry("1000x700")
+        TOIFinderGUI(root)
+
+    if auth.session_present():
+        start_main_ui()
+    else:
+        root.title("Sign in — TelegramTOI")
+        root.geometry("460x560")
+
+        def on_login_done(success: bool) -> None:
+            if success:
+                start_main_ui()
+            else:
+                root.destroy()
+
+        root.protocol("WM_DELETE_WINDOW", lambda: on_login_done(False))
+        login_gui.LoginView(root, on_done=on_login_done).pack(fill="both", expand=True)
+
     root.mainloop()
 
 

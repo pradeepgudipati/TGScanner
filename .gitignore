@@ -221,3 +221,6 @@ outputs/
 ruff_errors.txt
 .python-version
 *.log
+
+# Keep the PyInstaller build spec under version control
+!TelegramTOI.spec
