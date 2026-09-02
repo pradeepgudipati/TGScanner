@@ -31,8 +31,10 @@ jobs:
             artifact: TelegramTOI-linux-x64.tar.gz
           - os: macos-latest
             artifact: TelegramTOI-macos-arm64.zip
-          - os: macos-13
-            artifact: TelegramTOI-macos-x64.zip
+          # Intel macOS: GitHub-hosted `macos-13` runners are being retired and
+          # frequently sit un-dispatched. Re-enable when runners are available.
+          # - os: macos-13
+          #   artifact: TelegramTOI-macos-x64.zip
     steps:
       - uses: actions/checkout@v5
         with:
@@ -98,7 +100,6 @@ jobs:
             | Windows | `TelegramTOI-windows-x64.zip` | Unzip, run `TelegramTOI.exe` |
             | Linux | `TelegramTOI-linux-x64.tar.gz` | `tar -xzf`, run `./TelegramTOI` |
             | macOS (Apple Silicon) | `TelegramTOI-macos-arm64.zip` | Unzip, right-click `TelegramTOI.app` → Open |
-            | macOS (Intel) | `TelegramTOI-macos-x64.zip` | Unzip, right-click `TelegramTOI.app` → Open |
 
             The apps are **unsigned**. macOS Gatekeeper needs right-click → Open (or
             `xattr -dr com.apple.quarantine TelegramTOI.app`); Windows SmartScreen
