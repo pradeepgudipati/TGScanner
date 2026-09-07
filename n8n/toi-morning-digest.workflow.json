@@ -1,0 +1,126 @@
+{
+  "name": "TOI Morning Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/15 5-11 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 15 min, 5-11am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=http://localhost:8787/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "newspaper", "value": "toi" },
+            { "name": "date", "value": "={{ $now.format('dd-MM-yyyy') }}" }
+          ]
+        },
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "call-toi-scanner",
+      "name": "Scan Telegram (local API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Dedupe against msg_ids we've already emailed, using n8n workflow static data\n// (persists across executions of this workflow on this n8n instance).\nconst body = $input.first().json;\n\nif (body.ok === false) {\n  throw new Error(`Scanner error: ${body.error}`);\n}\n\nconst results = body.results || [];\nconst staticData = $getWorkflowStaticData('global');\nif (!staticData.seenMsgIds) staticData.seenMsgIds = [];\n\nconst seen = new Set(staticData.seenMsgIds);\nconst fresh = results.filter(r => !seen.has(r.msg_id));\n\n// Remember everything we saw this run so we don't re-email it tomorrow.\nfor (const r of results) seen.add(r.msg_id);\n// Cap stored history so static data doesn't grow unbounded.\nstaticData.seenMsgIds = Array.from(seen).slice(-2000);\n\nreturn fresh.map(r => ({ json: r }));"
+      },
+      "id": "dedupe-new-items",
+      "name": "Keep only new editions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "leftValue": "={{ $items().length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "has-new-items",
+      "name": "Any new editions?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map(i => i.json);\nconst rows = items.map(r => `<li><a href=\"${r.deep_link}\">${r.filename}</a> — ${r.channel} (${r.size_mb} MB)</li>`).join('');\nconst html = `<p>New ${items[0].newspaper.toUpperCase()} edition(s) found:</p><ul>${rows}</ul>`;\nreturn [{ json: { html, count: items.length } }];"
+      },
+      "id": "build-email-html",
+      "name": "Build email body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"from\": \"TOI Digest <digest@yourdomain.com>\", \"to\": [\"pradeepgudipati@gmail.com\"], \"subject\": `New TOI edition(s) available (${$json.count})`, \"html\": $json.html } }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "send-resend-email",
+      "name": "Send email via Resend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -60],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_CREDENTIAL_ID",
+          "name": "Resend API Key"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 15 min, 5-11am": {
+      "main": [[{ "node": "Scan Telegram (local API)", "type": "main", "index": 0 }]]
+    },
+    "Scan Telegram (local API)": {
+      "main": [[{ "node": "Keep only new editions", "type": "main", "index": 0 }]]
+    },
+    "Keep only new editions": {
+      "main": [[{ "node": "Any new editions?", "type": "main", "index": 0 }]]
+    },
+    "Any new editions?": {
+      "main": [
+        [{ "node": "Build email body", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Build email body": {
+      "main": [[{ "node": "Send email via Resend", "type": "main", "index": 0 }]]
+    }
+  }
+}
