@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from datetime import datetime
@@ -108,8 +109,11 @@ class TOIFinderGUI:
         # --- Sidebar Frame ---
         self.sidebar_frame = ctk.CTkFrame(self.root, width=200, corner_radius=0)
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-        # Row 7 will be the spacer
-        self.sidebar_frame.grid_rowconfigure(7, weight=1)
+        # Row 8 will be the spacer
+        self.sidebar_frame.grid_rowconfigure(8, weight=1)
+
+        # How long to wait between auto-repeat attempts (seconds).
+        self.loop_interval = 60.0
 
         self.logo_label = ctk.CTkLabel(
             self.sidebar_frame,
@@ -154,16 +158,24 @@ class TOIFinderGUI:
         )
         self.stop_btn.grid(row=6, column=0, padx=20, pady=10)
 
+        self.loop_var = tk.BooleanVar(value=False)
+        self.loop_checkbox = ctk.CTkCheckBox(
+            self.sidebar_frame,
+            text="Auto-repeat every 1 min\nuntil found 🔊",
+            variable=self.loop_var,
+        )
+        self.loop_checkbox.grid(row=7, column=0, padx=20, pady=(0, 10))
+
         self.appearance_mode_label = ctk.CTkLabel(
             self.sidebar_frame, text="Appearance Mode:", anchor="w"
         )
-        self.appearance_mode_label.grid(row=8, column=0, padx=20, pady=(10, 0))
+        self.appearance_mode_label.grid(row=9, column=0, padx=20, pady=(10, 0))
         self.appearance_mode_optionemenu = ctk.CTkOptionMenu(
             self.sidebar_frame,
             values=["Dark", "Light", "System"],
             command=self.change_appearance_mode_event,
         )
-        self.appearance_mode_optionemenu.grid(row=9, column=0, padx=20, pady=(10, 10))
+        self.appearance_mode_optionemenu.grid(row=10, column=0, padx=20, pady=(10, 10))
 
         self.account_button = ctk.CTkButton(
             self.sidebar_frame,
@@ -173,7 +185,7 @@ class TOIFinderGUI:
             text_color=("gray10", "#DCE4EE"),
             command=self.open_account_menu,
         )
-        self.account_button.grid(row=10, column=0, padx=20, pady=(0, 20))
+        self.account_button.grid(row=11, column=0, padx=20, pady=(0, 20))
 
         # --- Main Content Frame ---
         self.main_frame = ctk.CTkFrame(
@@ -456,6 +468,47 @@ class TOIFinderGUI:
         self.stop_btn.configure(state="disabled")
         # Do not clear self.process here — an active search may still own it.
 
+    @staticmethod
+    def play_alert_sound(repeats: int = 3) -> None:
+        """Ring an audible alert (Windows beep + terminal bell fallback)."""
+        try:
+            if sys.platform == "win32":
+                try:
+                    import winsound
+
+                    for _ in range(max(1, repeats)):
+                        winsound.Beep(880, 500)
+                        winsound.Beep(660, 500)
+                    return
+                except Exception:
+                    pass
+            # Fallback: console bell (\a prints in the log, bell in UI).
+            print("\a", flush=True)
+        except Exception:
+            pass
+
+    def _notify_found(self) -> None:
+        """UI-thread alert: bell + status. Winsound already played in worker."""
+        try:
+            self.root.bell()
+        except Exception:
+            pass
+        self.status_label.configure(text="✓ Found! Search complete — stopping.")
+
+    def _wait_interruptible(self, seconds: float, generation: int) -> bool:
+        """Sleep in 1s steps; return False if the search was stopped."""
+        remaining = int(seconds)
+        for left in range(remaining, 0, -1):
+            if self.stop_search_flag or generation != self._search_generation:
+                return False
+            self.root.after(
+                0,
+                self.status_label.configure,
+                {"text": f"⏳ No match — retrying in {left}s... (Stop to cancel)"},
+            )
+            time.sleep(1)
+        return not self.stop_search_flag and generation == self._search_generation
+
     def start_search(self):
         with self._search_lock:
             if self.process is not None and self.process.poll() is None:
@@ -466,7 +519,17 @@ class TOIFinderGUI:
             self._search_generation += 1
             generation = self._search_generation
             self.stop_search_flag = False
+            # Read the checkbox in the UI thread (tk vars aren't thread-safe).
+            try:
+                loop_enabled = bool(self.loop_var.get())
+            except Exception:
+                loop_enabled = False
+            self._loop_requested = loop_enabled
 
+        if loop_enabled:
+            self.append_output(
+                "🔁 Auto-repeat ON: will retry every 1 min until a file is found."
+            )
         self.search_button.configure(state="disabled")
         self.status_label.configure(text="Searching... Please wait")
 
@@ -475,8 +538,55 @@ class TOIFinderGUI:
         )
         thread.start()
 
-    def run_search(self, generation: int):
+    def _run_single_attempt(self, generation: int, cmd, work_dir) -> bool:
+        """Run one worker subprocess. Returns True when file(s) were found."""
         process = None
+        found = False
+        try:
+            popen_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "bufsize": 1,
+                "cwd": str(work_dir),
+            }
+            if sys.platform == "win32":
+                flags = subprocess.CREATE_NEW_PROCESS_GROUP
+                if getattr(sys, "frozen", False):
+                    flags |= subprocess.CREATE_NO_WINDOW
+                popen_kwargs["creationflags"] = flags
+
+            process = subprocess.Popen(cmd, **popen_kwargs)
+
+            with self._search_lock:
+                if generation != self._search_generation or self.stop_search_flag:
+                    terminate_process_tree(process)
+                    return False
+                self.process = process
+
+            self.root.after(0, lambda: self.stop_btn.configure(state="normal"))
+
+            assert process.stdout is not None
+            for line in process.stdout:
+                if self.stop_search_flag or generation != self._search_generation:
+                    terminate_process_tree(process)
+                    self.root.after(0, self.append_output, "Search stopped by user.")
+                    return False
+                if "[MATCH]" in line:
+                    found = True
+                self.root.after(0, self.append_output, line)
+
+            process.wait()
+            return found
+        finally:
+            if process is not None and process.poll() is None:
+                terminate_process_tree(process)
+            with self._search_lock:
+                if self.process is process:
+                    self.process = None
+
+    def run_search(self, generation: int):
         try:
             search_mode = self.search_mode_menu.get()
             if search_mode == "Magazine Search":
@@ -502,58 +612,63 @@ class TOIFinderGUI:
                     worker_args.extend(["--ai-query", ai_query])
 
             cmd, work_dir = build_worker_command(worker, worker_args)
+            loop_enabled = bool(getattr(self, "_loop_requested", False))
+            interval = float(getattr(self, "loop_interval", 60.0))
 
-            popen_kwargs = {
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.STDOUT,
-                "encoding": "utf-8",
-                "errors": "replace",
-                "bufsize": 1,
-                "cwd": str(work_dir),
-            }
-            if sys.platform == "win32":
-                flags = subprocess.CREATE_NEW_PROCESS_GROUP
-                if getattr(sys, "frozen", False):
-                    flags |= subprocess.CREATE_NO_WINDOW
-                popen_kwargs["creationflags"] = flags
-
-            process = subprocess.Popen(cmd, **popen_kwargs)
-
-            with self._search_lock:
-                if generation != self._search_generation or self.stop_search_flag:
-                    terminate_process_tree(process)
-                    return
-                self.process = process
-
-            self.root.after(0, lambda: self.stop_btn.configure(state="normal"))
-
-            assert process.stdout is not None
-            for line in process.stdout:
+            attempt = 0
+            while True:
                 if self.stop_search_flag or generation != self._search_generation:
-                    terminate_process_tree(process)
-                    self.root.after(0, self.append_output, "Search stopped by user.")
                     break
-                self.root.after(0, self.append_output, line)
+                attempt += 1
+                if attempt > 1:
+                    self.root.after(
+                        0,
+                        self.append_output,
+                        f"\n🔁 Auto-repeat attempt {attempt} — searching again...",
+                    )
+                self.root.after(
+                    0,
+                    self.status_label.configure,
+                    {
+                        "text": f"Searching... (attempt {attempt})"
+                        + (" — auto-repeat ON" if loop_enabled else "")
+                    },
+                )
 
-            if not self.stop_search_flag and generation == self._search_generation:
-                exit_code = process.wait()
-                if exit_code == 0:
+                found = self._run_single_attempt(generation, cmd, work_dir)
+
+                if self.stop_search_flag or generation != self._search_generation:
+                    break
+
+                if found:
                     self.root.after(
-                        0, self.status_label.configure, text="✓ Search completed!"
+                        0, self.append_output, "✅ File found — search complete!"
                     )
-                else:
+                    self.play_alert_sound()
+                    self.root.after(0, self._notify_found)
+                    break
+
+                # No match in this attempt.
+                if not loop_enabled:
                     self.root.after(
-                        0, self.status_label.configure, text="✗ Search failed"
+                        0, self.status_label.configure, text="✗ No matches found"
                     )
+                    break
+
+                self.root.after(
+                    0,
+                    self.append_output,
+                    f"⏳ Attempt {attempt}: no match — waiting 1 min before retry...",
+                )
+                if not self._wait_interruptible(interval, generation):
+                    break
+                # ... otherwise loop and run the next attempt.
 
         except Exception as e:
             self.root.after(0, self.append_output, f"✗ Error: {e}")
         finally:
-            if process is not None and process.poll() is None:
-                terminate_process_tree(process)
             with self._search_lock:
-                if self.process is process:
-                    self.process = None
+                self.process = None
             if generation == self._search_generation:
                 self.root.after(0, self.search_button.configure, state="normal")
                 self.root.after(0, self.stop_btn.configure, state="disabled")

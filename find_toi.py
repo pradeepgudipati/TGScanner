@@ -18,6 +18,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
@@ -197,6 +198,36 @@ def get_deep_link(dialog, msg) -> str:
         )
     except Exception:
         return "N/A"
+
+
+def play_alert_sound(repeats: int = 3) -> None:
+    """Play an audible alert when a search completes with matches.
+
+    Windows: uses winsound.Beep, falls back to the console bell.
+    Other platforms: console bell (\\a) so it works over SSH/terminals too.
+    Never raises — sound must not break the search result.
+    """
+    try:
+        if sys.platform == "win32":
+            try:
+                import winsound
+
+                for _ in range(max(1, repeats)):
+                    # Two-tone siren: high then low, easy to hear.
+                    winsound.Beep(880, 500)
+                    winsound.Beep(660, 500)
+                return
+            except Exception:
+                pass
+        # Fallback: terminal bell.
+        try:
+            for _ in range(max(1, repeats)):
+                print("\a", end="", flush=True)
+                time.sleep(0.3)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 async def ai_filter_matches(filenames: List[str], query: str) -> List[str]:
@@ -437,6 +468,29 @@ def parse_args(argv=None):
         default=5,
         help="Number of retries for database lock errors (default 5)",
     )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Run continuously: repeat the search until files are found "
+        "(stop + alert sound on success).",
+    )
+    parser.add_argument(
+        "--loop-interval",
+        type=float,
+        default=60.0,
+        help="Seconds to wait between attempts in --loop mode (default 60)",
+    )
+    parser.add_argument(
+        "--loop-max",
+        type=int,
+        default=0,
+        help="Max attempts in --loop mode (default 0 = infinite until found)",
+    )
+    parser.add_argument(
+        "--no-sound",
+        action="store_true",
+        help="Disable the alert sound on success (loop and single-run)",
+    )
     return parser.parse_args(argv)
 
 
@@ -464,8 +518,8 @@ def main(argv=None):
     if args.keywords:
         keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
 
-    try:
-        return_code = asyncio.run(
+    def _run_once() -> int:
+        return asyncio.run(
             find_matching_files(
                 keywords=keywords,
                 date_str=date_str,
@@ -474,8 +528,46 @@ def main(argv=None):
                 ai_query=args.ai_query,
                 newspaper=args.newspaper,
             )
+        ) or 0
+
+    try:
+        if not args.loop:
+            return_code = _run_once()
+            if return_code == 0 and not args.no_sound:
+                play_alert_sound()
+            return return_code
+
+        interval = max(1.0, float(args.loop_interval))
+        max_attempts = max(0, int(args.loop_max))
+        attempt = 0
+        logger.info(
+            "Loop mode: repeating every %.0fs until files are found "
+            "(Ctrl+C to stop)%s.",
+            interval,
+            f", max {max_attempts} attempts" if max_attempts else "",
         )
-        return return_code or 0
+        while True:
+            attempt += 1
+            logger.info("Attempt %s — searching...", attempt)
+            return_code = _run_once()
+            if return_code == 0:
+                logger.info(
+                    "Search complete — file(s) found on attempt %s.", attempt
+                )
+                if not args.no_sound:
+                    play_alert_sound()
+                return 0
+            if max_attempts and attempt >= max_attempts:
+                logger.warning(
+                    "Loop stopped after %s attempt(s) with no matches.", attempt
+                )
+                return 2
+            logger.info(
+                "No matches on attempt %s — retrying in %.0fs...",
+                attempt,
+                interval,
+            )
+            time.sleep(interval)
     except KeyboardInterrupt:
         logger.warning("Interrupted by user")
         return 1
