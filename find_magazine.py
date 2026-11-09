@@ -382,11 +382,16 @@ class MagazineSearcher:
             ).hexdigest()
             cache_path = CACHE_DIR / f"{cache_key}.json"
             if self.cache_enabled and cache_path.exists():
-                with open(cache_path, "r") as f:
-                    c["ai_decision"] = json.load(f)
-                    if c["ai_decision"].get("decision") == "RELEVANT":
-                        results.append(c)
-                        self._log_match(c)
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        c["ai_decision"] = json.load(f)
+                        if c["ai_decision"].get("decision") == "RELEVANT":
+                            results.append(c)
+                            self._log_match(c)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    # Cache can disappear/corrupt if the app folder is replaced while running.
+                    # Treat it as a miss and let AI re-evaluate.
+                    pass
                 continue
             to_evaluate.append(c)
 
@@ -410,7 +415,8 @@ class MagazineSearcher:
                         f"{user_keywords}:{c['filename']}:{c['size']}".encode()
                     ).hexdigest()
                     cache_path = CACHE_DIR / f"{cache_key}.json"
-                    with open(cache_path, "w") as f:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(cache_path, "w", encoding="utf-8") as f:
                         json.dump(decision, f)
                 if decision.get("decision") == "RELEVANT":
                     results.append(c)

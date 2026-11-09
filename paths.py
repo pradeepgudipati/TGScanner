@@ -48,13 +48,29 @@ def config_dir() -> Path:
     return Path(sys.executable).resolve().parent
 
 
+def user_data_dir() -> Path:
+    """Stable writable directory for the installed app, outside the build output."""
+    override = os.getenv("TELEGRAMTOI_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+
+    if sys.platform.startswith("win"):
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return base / APP_NAME
+
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP_NAME
+
+
 def data_dir() -> Path:
     """Root directory for all writable state (env, session, logs, outputs, cache)."""
     override = os.getenv("TELEGRAMTOI_HOME")
     if override:
         base = Path(override).expanduser()
     elif is_frozen():
-        base = Path(sys.executable).resolve().parent
+        base = user_data_dir()
     else:
         base = Path(__file__).resolve().parent
     base.mkdir(parents=True, exist_ok=True)

@@ -75,11 +75,36 @@ Output lands in `dist/TelegramTOI/` (a folder app; `TelegramTOI.app` on macOS).
 PyInstaller does **not** cross-compile — run the command on each OS you want a
 build for (Windows `.exe`, macOS `.app`, Linux binary).
 
+### Faster local builds
+
+If you rebuild often and want faster turnaround, disable UPX compression for
+that run:
+
+```powershell
+$env:TELEGRAMTOI_FAST_BUILD=1
+uv run pyinstaller .\TelegramTOI.spec
+```
+
+This produces a larger app bundle, but build time is usually much faster.
+Fast builds also output to `dist/TelegramTOI-fast/` so they don’t clash with a
+running `dist/TelegramTOI/` app instance.
+
+If you build the normal release target (`dist/TelegramTOI/`), close any running
+`TelegramTOI.exe` first to avoid Windows file-lock errors on log/session files.
+
+For release builds, run without `TELEGRAMTOI_FAST_BUILD` so compression is
+enabled.
+
 ### Config location for the packaged app
 
 The source checkout keeps using the repo root for `.env`, `toi_session.session`,
-logs and `outputs/`. The **packaged app** uses the executable folder
-(`dist/TelegramTOI/`) for writable state by default.
+logs and `outputs/`. The **packaged app** stores writable state in a stable user
+folder instead of the build output, so a new build won't invalidate the saved
+Telegram login session.
+
+Windows: `%APPDATA%\TelegramTOI`
+macOS: `~/Library/Application Support/TelegramTOI`
+Linux: `${XDG_CONFIG_HOME:-~/.config}/TelegramTOI`
 
 The sign-in screen writes `.env` and `toi_session.session` there; the session
 file's permissions are tightened to your user account. Set `TELEGRAMTOI_HOME`

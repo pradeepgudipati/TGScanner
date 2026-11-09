@@ -4,9 +4,19 @@
 # PyInstaller does not cross-compile — build on each target OS (or in CI).
 
 import sys
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+FAST_BUILD = os.getenv("TELEGRAMTOI_FAST_BUILD", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+USE_UPX = not FAST_BUILD
+APP_BUILD_NAME = "TelegramTOI-fast" if FAST_BUILD else "TelegramTOI"
 
 datas = [(".env.sample", ".")]
 if Path(".env").exists():
@@ -35,11 +45,11 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="TelegramTOI",
+    name=APP_BUILD_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=USE_UPX,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -54,15 +64,15 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=USE_UPX,
     upx_exclude=[],
-    name="TelegramTOI",
+    name=APP_BUILD_NAME,
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="TelegramTOI.app",
+        name=(f"{APP_BUILD_NAME}.app"),
         icon=None,
         bundle_identifier="com.telegramtoi.app",
         info_plist={"NSHighResolutionCapable": True},
