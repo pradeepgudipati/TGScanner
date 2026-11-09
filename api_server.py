@@ -18,7 +18,7 @@ Endpoint:
 
     All query params are optional:
       - date: defaults to today (server local date)
-      - newspaper: "toi" (default) or "dc"
+      - newspaper: "toi" (Hyderabad, default), "toi_any" (any city), or "dc"
       - keywords: comma-separated override of the default keyword list
       - ai_query: optional semantic query (requires OPENAI_MODEL configured)
 

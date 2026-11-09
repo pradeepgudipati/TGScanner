@@ -2,8 +2,8 @@
 
 The GUI drives an interactive Telethon sign-in (phone -> code -> optional 2FA
 password). The authorised session is written to ``paths.session_file()`` inside
-the per-user config directory and reused on every launch. On Windows the file's
-ACL is tightened to the current user; on POSIX it is chmod 0600.
+the app's writable data directory and reused on every launch. On Windows the
+file's ACL is tightened to the current user; on POSIX it is chmod 0600.
 """
 
 from __future__ import annotations

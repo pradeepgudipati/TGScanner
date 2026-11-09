@@ -4,6 +4,7 @@ A powerful Telegram scanning tool that finds newspapers (TOI/DC) and magazines u
 
 ## Features
 - **TOI Search**: Find "Times of India" Hyderabad edition links.
+- **TOI Search (Any City)**: Find "Times of India" links for any city edition (today by default).
 - **DC Search**: Find "Deccan Chronicle" Hyderabad edition links.
 - **Magazine Search**: Find any English magazine by keywords using AI for smart classification.
 - **Deep Links**: Results include direct clickable links to Telegram messages.
@@ -43,6 +44,12 @@ A powerful Telegram scanning tool that finds newspapers (TOI/DC) and magazines u
    A pre-existing `toi_session.session` in the project root (or config dir) is
    picked up automatically and skips the sign-in screen.
 
+   > If you launch the packaged `TelegramTOI.exe` (including via a desktop
+   > shortcut), config is loaded in this order:
+   > 1) `.env` next to `TelegramTOI.exe`,
+   > 2) bundled `.env` inside the app build,
+   > 3) bundled `.env.sample` defaults.
+
 ## Running the App
 
 Simply run the batch file:
@@ -71,20 +78,24 @@ build for (Windows `.exe`, macOS `.app`, Linux binary).
 ### Config location for the packaged app
 
 The source checkout keeps using the repo root for `.env`, `toi_session.session`,
-logs and `outputs/`. The **packaged app** instead uses a per-user directory:
+logs and `outputs/`. The **packaged app** uses the executable folder
+(`dist/TelegramTOI/`) for writable state by default.
 
-| OS      | Path                                               |
-|---------|----------------------------------------------------|
-| Windows | `%APPDATA%\TelegramTOI`                             |
-| macOS   | `~/Library/Application Support/TelegramTOI`         |
-| Linux   | `${XDG_CONFIG_HOME:-~/.config}/TelegramTOI`         |
+The sign-in screen writes `.env` and `toi_session.session` there; the session
+file's permissions are tightened to your user account. Set `TELEGRAMTOI_HOME`
+to override the location.
 
-The sign-in screen writes `.env` and `toi_session.session` there for you; the
-session file's permissions are tightened to your user account. Set
-`TELEGRAMTOI_HOME` to override the location.
+To embed your current repo `.env` into the packaged app, keep `.env` present in
+the repo when running:
+
+```bash
+uv run pyinstaller TelegramTOI.spec
+```
+
+This avoids requiring a separate external config path on first run.
 
 ## How to use Magazine Search
 1. Type keywords (e.g., 'National Geographic' or 'finance') in the **Keywords / AI Query** field.
 2. The search mode will automatically switch to **Magazine Search**.
-3. Click **Start Search**.
+3. Click **Start Search** (AI connectivity is validated first; Telegram channels are scanned only after it succeeds).
 4. Click on any result in the sidebar to copy the link and open it in Telegram.

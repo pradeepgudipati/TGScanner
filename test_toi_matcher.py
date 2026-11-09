@@ -31,6 +31,16 @@ class CompileMatchersTests(unittest.TestCase):
         self.assertFalse(base_regex.search("ToI Chennai 19'04'2026.pdf"))
         self.assertTrue(date_regex.search("ToI Chennai 19'04'2026.pdf"))
 
+    def test_toi_any_city_accepts_non_hyderabad_files(self):
+        base_regex, date_regex = compile_matchers(
+            ["TOI", "TOIH"], "19-04-2026", newspaper="toi_any"
+        )
+
+        self.assertTrue(base_regex.search("ToI Chennai 19'04'2026.pdf"))
+        self.assertTrue(date_regex.search("ToI Chennai 19'04'2026.pdf"))
+        self.assertTrue(base_regex.search("TOIH_19-04-2026.pdf"))
+        self.assertTrue(date_regex.search("TOIH_19-04-2026.pdf"))
+
     def test_matches_deccan_chronicle_formats(self):
         base_regex, date_regex = compile_matchers(
             ["DC", "Deccan Chronicle"], "19-04-2026", newspaper="dc"

@@ -127,7 +127,13 @@ class TOIFinderGUI:
         )
         self.search_mode_label.grid(row=1, column=0, padx=20, pady=(10, 0))
         self.search_mode_menu = ctk.CTkOptionMenu(
-            self.sidebar_frame, values=["TOI Search", "DC Search", "Magazine Search"]
+            self.sidebar_frame,
+            values=[
+                "TOI Search",
+                "TOI Search (Any City)",
+                "DC Search",
+                "Magazine Search",
+            ],
         )
         self.search_mode_menu.grid(row=2, column=0, padx=20, pady=(5, 10))
 
@@ -605,7 +611,9 @@ class TOIFinderGUI:
             else:
                 worker = "toi"
                 worker_args = []
-                if search_mode == "DC Search":
+                if search_mode == "TOI Search (Any City)":
+                    worker_args.extend(["--newspaper", "toi_any"])
+                elif search_mode == "DC Search":
                     worker_args.extend(["--newspaper", "dc"])
                 ai_query = self.ai_entry.get().strip()
                 if ai_query:
@@ -688,7 +696,7 @@ class TOIFinderGUI:
         try:
             if (
                 hasattr(self, "search_mode_menu")
-                and self.search_mode_menu.get() == "TOI Search"
+                and self.search_mode_menu.get() != "Magazine Search"
             ):
                 self.search_mode_menu.set("Magazine Search")
         except Exception:

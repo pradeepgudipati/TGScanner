@@ -6,8 +6,8 @@ _Last updated: 2026-09-02. Branch: `main` @ `6ed7d83`._
 
 - **TGScanner is now a double-clickable desktop app.** No terminal, no `uv run`.
   The `customtkinter` GUI ([toi_gui.py](../toi_gui.py)) is packaged with PyInstaller.
-- **In-app Telegram login works** (phone → code → 2FA). Session is stored per-user
-  and reused on every launch. Verified end-to-end on Windows.
+- **In-app Telegram login works** (phone → code → 2FA). Session is stored in the
+  app writable directory and reused on every launch. Verified end-to-end on Windows.
 - **Release [v0.1.0](https://github.com/pradeepgudipati/TGScanner/releases/tag/v0.1.0)
   is published** with 3 assets:
   - `TelegramTOI-windows-x64.zip`
@@ -19,7 +19,7 @@ _Last updated: 2026-09-02. Branch: `main` @ `6ed7d83`._
 
 | Area | File(s) | Notes |
 |------|---------|-------|
-| Path resolution | [paths.py](../paths.py) *(new)* | Single source of truth for `.env`, session, logs, `outputs/`, `.cache/`. Source runs unchanged (repo root). Frozen runs use a per-user config dir. `TELEGRAMTOI_HOME` overrides. |
+| Path resolution | [paths.py](../paths.py) *(new)* | Single source of truth for `.env`, session, logs, `outputs/`, `.cache/`. Source runs unchanged (repo root). Frozen runs default to executable folder. `TELEGRAMTOI_HOME` overrides. |
 | Auth plumbing | [auth.py](../auth.py) *(new)* | `session_present()` (offline check), `AsyncWorker` (bg asyncio loop), `LoginFlow` (multi-step sign-in), `sign_out()`, `harden_session_permissions()` (icacls on Win, chmod 0600 on POSIX). |
 | Login UI | [login_gui.py](../login_gui.py) *(new)* | `LoginView` frame with credential / phone / code / 2FA pages. `LoginView(root, on_done=cb)` for the pre-main gate; `run_login_overlay(root)` for the sidebar re-login. |
 | Main GUI | [toi_gui.py](../toi_gui.py) | `main()` gates on `auth.session_present()`; "Telegram account" sidebar button (switch account / sign out). Frozen builds re-invoke the exe as `TelegramTOI --worker toi|magazine …` instead of `uv run` (see `build_worker_command` / `run_worker`). |
@@ -31,14 +31,11 @@ _Last updated: 2026-09-02. Branch: `main` @ `6ed7d83`._
 
 ## Config / data location (packaged app)
 
-| OS | Path |
-|----|------|
-| Windows | `%APPDATA%\TelegramTOI` |
-| macOS | `~/Library/Application Support/TelegramTOI` |
-| Linux | `${XDG_CONFIG_HOME:-~/.config}/TelegramTOI` |
+Default: same directory as the packaged executable (for example `dist/TelegramTOI/`).
+Override with `TELEGRAMTOI_HOME`.
 
-Holds `.env` (seeded from bundled `.env.sample` on first run), `toi_session.session`
-(ACL-locked to the user), `logs/`, `outputs/`, `.cache/`.
+Holds `.env` (or bundled defaults), `toi_session.session` (ACL-locked to the
+user), `logs/`, `outputs/`, `.cache/`.
 
 ## Build locally
 

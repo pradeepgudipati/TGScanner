@@ -59,6 +59,15 @@ NEWSPAPER_PROFILES = {
         "label": "TOI",
         "keywords": ["TOI", "TOIH"],
         "aliases": [r"(?<![A-Za-z0-9])TOIH?(?![A-Za-z0-9])"],
+        "city_aliases": [r"(?<![A-Za-z0-9])hyd(?:erabad)?(?![A-Za-z0-9])"],
+        "city_description": "Hyderabad/Hyd",
+    },
+    "toi_any": {
+        "label": "TOI (Any City)",
+        "keywords": ["TOI", "TOIH"],
+        "aliases": [r"(?<![A-Za-z0-9])TOIH?(?![A-Za-z0-9])"],
+        "city_aliases": [],
+        "city_description": "Any city",
     },
     "dc": {
         "label": "DC",
@@ -67,6 +76,8 @@ NEWSPAPER_PROFILES = {
             r"(?<![A-Za-z0-9])DC(?![A-Za-z0-9])",
             r"Deccan[\s_-]+Chronicle",
         ],
+        "city_aliases": [r"(?<![A-Za-z0-9])hyd(?:erabad)?(?![A-Za-z0-9])"],
+        "city_description": "Hyderabad/Hyd",
     },
 }
 DEFAULT_NEWSPAPER = "toi"
@@ -115,7 +126,7 @@ def keyword_to_pattern(keyword: str) -> str:
 def compile_matchers(
     keywords: List[str], date_str: str, newspaper: str = DEFAULT_NEWSPAPER
 ):
-    """Build regexes for the selected Hyderabad newspaper and date component."""
+    """Build regexes for the selected newspaper profile and date component."""
     # Parse the input date (DD-MM-YYYY)
     try:
         dt = datetime.strptime(date_str, "%d-%m-%Y")
@@ -137,17 +148,20 @@ def compile_matchers(
         date_pattern = re.escape(date_str)
 
     profile = NEWSPAPER_PROFILES.get(newspaper.lower())
+    city_patterns = profile["city_aliases"] if profile else []
     if profile and keywords == profile["keywords"]:
         paper_patterns = profile["aliases"]
     else:
         paper_patterns = [keyword_to_pattern(k) for k in keywords]
     paper_pattern = "|".join(paper_patterns)
 
-    # Match files that contain the selected paper and Hyderabad/Hyd in any order.
-    base_regex = re.compile(
-        rf"(?=.*(?:{paper_pattern}))(?=.*(?:hyd|hyderabad))",
-        re.IGNORECASE,
-    )
+    # Match files that contain the selected paper and (if configured) city aliases.
+    if city_patterns:
+        city_pattern = "|".join(city_patterns)
+        base_pattern = rf"(?=.*(?:{paper_pattern}))(?=.*(?:{city_pattern}))"
+    else:
+        base_pattern = rf"(?=.*(?:{paper_pattern}))"
+    base_regex = re.compile(base_pattern, re.IGNORECASE)
     date_regex = re.compile(date_pattern, re.IGNORECASE)
     return base_regex, date_regex
 
@@ -268,8 +282,9 @@ async def find_matching_files(
     api_id, api_hash = get_env_api_credentials()
     profile = NEWSPAPER_PROFILES.get(newspaper.lower())
     newspaper_label = profile["label"] if profile else newspaper.upper()
+    city_description = profile["city_description"] if profile else "Any city"
     logger.info(f"Starting {newspaper_label} PDF lookup for date: {date_str}")
-    logger.info(f"Keywords: {keywords}, Must contain: Hyderabad or Hyd")
+    logger.info(f"Keywords: {keywords}, City filter: {city_description}")
 
     if TelegramClient is None:
         logger.error("Error: telethon is not installed. Please install it.")

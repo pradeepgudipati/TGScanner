@@ -4,10 +4,13 @@
 # PyInstaller does not cross-compile — build on each target OS (or in CI).
 
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 datas = [(".env.sample", ".")]
+if Path(".env").exists():
+    datas.append((".env", "."))
 datas += collect_data_files("customtkinter")
 datas += collect_data_files("langdetect")
 

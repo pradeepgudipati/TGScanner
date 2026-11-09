@@ -245,6 +245,27 @@ class MagazineSearcher:
         logger.info(f"Found {len(deduped)} unique candidates.")
         return list(deduped.values())
 
+    async def validate_ai_connectivity(self) -> None:
+        """Fail fast on AI config/connectivity before Telegram scanning starts."""
+        if self.keyword_only:
+            return
+        if not self.openai_client or not self.openai_model:
+            raise RuntimeError("AI client/model is not configured for magazine search.")
+
+        logger.info("Checking AI connectivity before Telegram scan...")
+        try:
+            await self.openai_client.chat.completions.create(
+                model=self.openai_model,
+                messages=[{"role": "user", "content": "Reply with OK."}],
+                max_tokens=4,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "OpenAI connectivity check failed before Telegram scan. "
+                "Verify OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY and server availability."
+            ) from e
+        logger.info("AI connectivity check passed.")
+
     def _extract_candidate(
         self,
         msg: Message,
@@ -725,6 +746,7 @@ async def main(argv=None):
         openai_model=openai_model,
     )
     try:
+        await searcher.validate_ai_connectivity()
         await searcher.start()
         candidates = await searcher.scan_channels(
             limit=args.limit, max_age_days=max_age_days

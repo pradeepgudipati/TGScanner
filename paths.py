@@ -1,13 +1,8 @@
-"""Filesystem locations that work both from a source checkout and a PyInstaller bundle.
+"""Filesystem locations for source checkout and PyInstaller builds.
 
-When running from source, everything stays where it is today: the repo root holds
-``.env`` / ``toi_session.session`` / ``*.log`` and the ``outputs`` / ``.cache``
-directories. When frozen (``sys.frozen``), writable state moves to a per-user
-config directory so the app never tries to write next to its own executable:
-
-    Windows : %APPDATA%\\TelegramTOI
-    macOS   : ~/Library/Application Support/TelegramTOI
-    Linux   : ${XDG_CONFIG_HOME:-~/.config}/TelegramTOI
+By default, writable app state lives next to the running code:
+- source checkout: repo root
+- frozen app: executable directory (for example dist/TelegramTOI/)
 
 Set ``TELEGRAMTOI_HOME`` to force a specific directory in either mode.
 """
@@ -49,14 +44,8 @@ def bundle_dir() -> Path:
 
 
 def config_dir() -> Path:
-    """Per-user writable directory for a frozen app."""
-    if sys.platform == "win32":
-        root = Path(os.getenv("APPDATA") or Path.home() / "AppData" / "Roaming")
-    elif sys.platform == "darwin":
-        root = Path.home() / "Library" / "Application Support"
-    else:
-        root = Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config")
-    return root / APP_NAME
+    """Writable directory for a frozen app (same folder as the executable)."""
+    return Path(sys.executable).resolve().parent
 
 
 def data_dir() -> Path:
@@ -65,7 +54,7 @@ def data_dir() -> Path:
     if override:
         base = Path(override).expanduser()
     elif is_frozen():
-        base = config_dir()
+        base = Path(sys.executable).resolve().parent
     else:
         base = Path(__file__).resolve().parent
     base.mkdir(parents=True, exist_ok=True)
@@ -132,20 +121,23 @@ def set_env_values(values: dict[str, str]) -> Path:
 
 
 def load_env() -> Path:
-    """Load the ``.env`` for this install, seeding a template on first run when frozen."""
+    """Load env values with precedence: user .env, bundled .env, bundled .env.sample."""
     from dotenv import load_dotenv
 
     target = env_file()
-    if not target.exists() and (is_frozen() or os.getenv("TELEGRAMTOI_HOME")):
-        sample = bundle_dir() / ".env.sample"
-        try:
-            seed = sample.read_text(encoding="utf-8")
-        except OSError:
-            seed = _DEFAULT_ENV
-        target.write_text(seed, encoding="utf-8")
-
     if target.exists():
         load_dotenv(target)
-    else:
-        load_dotenv()
+        return target
+
+    bundled = bundle_dir() / ".env"
+    if bundled.exists():
+        load_dotenv(bundled)
+        return bundled
+
+    sample = bundle_dir() / ".env.sample"
+    if sample.exists():
+        load_dotenv(sample)
+        return sample
+
+    load_dotenv()
     return target

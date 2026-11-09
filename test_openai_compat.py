@@ -32,15 +32,13 @@ class LoadOpenAICompatTests(unittest.TestCase):
             load_openai_compat()
         self.assertIn("OPENAI_MODEL", str(ctx.exception))
 
-    def test_key_unset_uses_placeholder(self) -> None:
+    def test_key_unset_without_base_url_raises(self) -> None:
         os.environ["OPENAI_MODEL"] = "local-model"
-        with patch("openai_compat.AsyncOpenAI") as mock_cls:
-            mock_cls.return_value = MagicMock()
-            result = load_openai_compat()
-        mock_cls.assert_called_once_with(api_key=PLACEHOLDER_API_KEY)
-        self.assertEqual(result.model, "local-model")
+        with self.assertRaises(OpenAICompatConfigError) as ctx:
+            load_openai_compat()
+        self.assertIn("OPENAI_API_KEY is required", str(ctx.exception))
 
-    def test_base_url_set_passed_to_client(self) -> None:
+    def test_local_base_url_set_uses_placeholder_key(self) -> None:
         os.environ["OPENAI_MODEL"] = "local-model"
         os.environ["OPENAI_BASE_URL"] = "http://127.0.0.1:11434/v1"
         with patch("openai_compat.AsyncOpenAI") as mock_cls:
@@ -50,6 +48,13 @@ class LoadOpenAICompatTests(unittest.TestCase):
             api_key=PLACEHOLDER_API_KEY,
             base_url="http://127.0.0.1:11434/v1",
         )
+
+    def test_openai_host_with_placeholder_raises(self) -> None:
+        os.environ["OPENAI_MODEL"] = "gpt-4o-mini"
+        os.environ["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
+        with self.assertRaises(OpenAICompatConfigError) as ctx:
+            load_openai_compat()
+        self.assertIn("api.openai.com", str(ctx.exception))
 
     def test_base_url_unset_omits_arg(self) -> None:
         os.environ["OPENAI_MODEL"] = "gpt-4o-mini"
